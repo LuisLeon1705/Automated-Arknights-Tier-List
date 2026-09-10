@@ -1,0 +1,799 @@
+{% extends "base.html" %}
+
+{% block title %}Tier List - Arknights Analytics{% endblock %}
+
+{% block content %}
+<style>
+#tierlist-mode {
+    background-color: var(--surface);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    padding: 8px;
+    border-radius: 4px;
+    outline: none;
+}
+#tierlist-mode option {
+    background-color: var(--surface);
+    color: var(--text-primary);
+}
+
+.op-mini-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px;
+    width: 230px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    position: relative;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+    transition: transform 0.15s ease, border-color 0.15s ease;
+    box-sizing: border-box;
+    text-align: left;
+}
+.op-mini-card:hover {
+    transform: translateY(-2px);
+    border-color: var(--accent-primary);
+}
+.op-rarity-badge {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    font-size: 0.65rem;
+    font-weight: 800;
+    padding: 2px 6px;
+    border-radius: 4px;
+}
+.stars-6 { background: rgba(245, 158, 11, 0.25); color: #fbbf24; border: 1px solid #f59e0b; }
+.stars-5 { background: rgba(234, 179, 8, 0.2); color: #facc15; border: 1px solid #eab308; }
+.stars-4 { background: rgba(168, 85, 247, 0.2); color: #c084fc; border: 1px solid #a855f7; }
+.stars-3 { background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid #3b82f6; }
+.stars-2 { background: rgba(100, 116, 139, 0.2); color: #cbd5e1; border: 1px solid #64748b; }
+.stars-1 { background: rgba(100, 116, 139, 0.2); color: #94a3b8; border: 1px solid #475569; }
+
+.op-header-row {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 2px;
+}
+.op-portrait {
+    width: 48px;
+    height: 48px;
+    border-radius: 6px;
+    background: rgba(0,0,0,0.4);
+    object-fit: cover;
+    border: 1px solid var(--border);
+    flex-shrink: 0;
+}
+.op-title-block {
+    flex: 1;
+    min-width: 0;
+    padding-right: 32px;
+}
+.op-name {
+    font-weight: 700;
+    font-size: 0.92rem;
+    color: #fff;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.op-subclass {
+    font-size: 0.68rem;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.config-tags-row {
+    display: flex;
+    gap: 5px;
+    align-items: center;
+}
+.config-tag {
+    font-size: 0.65rem;
+    font-weight: 800;
+    padding: 2px 6px;
+    border-radius: 3px;
+    letter-spacing: 0.5px;
+}
+.skill-pill {
+    background: rgba(56, 189, 248, 0.2);
+    color: #38bdf8;
+    border: 1px solid rgba(56, 189, 248, 0.4);
+}
+.mod-pill {
+    background: rgba(192, 132, 252, 0.2);
+    color: #c084fc;
+    border: 1px solid rgba(192, 132, 252, 0.4);
+}
+.mod-pill.no-mod {
+    background: rgba(255, 255, 255, 0.05);
+    color: #94a3b8;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.op-score-pill {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: rgba(0,0,0,0.4);
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 0.72rem;
+    border-left: 3px solid var(--accent-primary);
+}
+.op-score-val {
+    font-weight: 800;
+    color: #38bdf8;
+    font-size: 0.88rem;
+}
+
+.op-stat-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
+    font-size: 0.72rem;
+    background: rgba(255,255,255,0.02);
+    padding: 6px;
+    border-radius: 4px;
+}
+.op-stat-item {
+    display: flex;
+    justify-content: space-between;
+    color: #94a3b8;
+}
+.op-stat-item span {
+    font-weight: 700;
+    color: #fff;
+}
+</style>
+
+    <div class="card">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; gap: 20px;">
+        <h2>MATHEMATICAL RANKING <span id="op-count-span" style="font-size: 1rem; color: var(--text-secondary); font-weight: normal;"></span></h2>
+        <div style="flex: 1; max-width: 800px; display: flex; gap: 10px; align-items: center;">
+            <input type="text" id="tierlist-search" placeholder="Search operator..." style="flex: 1;">
+            
+            <button id="export-csv" class="secondary">EXPORT CSV</button>
+            <button id="export-pdf-zip" class="secondary" style="display: inline-flex; align-items: center; gap: 6px; background: rgba(56, 189, 248, 0.15); border: 1px solid #38bdf8; color: #38bdf8; font-weight: 700;">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                DESCARGAR PDFS (.ZIP)
+            </button>
+            <button id="refresh-tierlist" class="primary">RECALCULATE</button>
+        </div>
+    </div>
+
+    <div style="margin-bottom: 1.5rem; display: flex; flex-wrap: wrap; gap: 20px; align-items: center;">
+        <div style="display: flex; gap: 10px; align-items: center;">
+            <label for="target-category" style="font-weight: bold; color: #38bdf8;">TARGET TIER:</label>
+            <select id="target-category" style="padding: 8px 12px; background: rgba(0,0,0,0.3); color: white; border: 1px solid var(--border); border-radius: 4px; font-weight: 500;">
+                <option value="general">General (Composite Dataset)</option>
+                <option value="normal">Normal Enemies (Swarms & Low Stats)</option>
+                <option value="elite">Elite Enemies (Mid-High DEF / RES)</option>
+                <option value="boss">Bosses (1000 DEF / 50 RES / 80k HP)</option>
+                <option value="dp">DP Generators (Pioneers, Agents & Flagbearers)</option>
+                <option value="ra">Reclamation Algorithm (RA Special Modules & Horde Combat)</option>
+                <option value="is">Integrated Strategies (IS Special Modules & Roguelike Scaling)</option>
+            </select>
+        </div>
+
+        <div style="display: flex; gap: 10px; align-items: center;">
+            <label for="tierlist-mode" style="font-weight: bold; color: var(--accent-primary);">RANKING METRIC:</label>
+            <select id="tierlist-mode" style="padding: 8px 12px; background: rgba(0,0,0,0.3); color: white; border: 1px solid var(--border); border-radius: 4px;">
+                <option value="general">Overall Combat Power</option>
+                <option value="dp">DP Generation (Total DP in 300s)</option>
+                <option value="wave">Wave Clearer (Fastest Time)</option>
+                <option value="boss">Boss Killer (Fastest Time)</option>
+                <option value="phys_dmg">Physical Damage</option>
+                <option value="arts_dmg">Arts Damage</option>
+                <option value="ele_dmg">Elemental Damage</option>
+                <option value="healing">Healing (Overall Effective)</option>
+                <option value="heal_phys">Healing & Phys Mitigation</option>
+                <option value="heal_arts">Healing & Arts Mitigation</option>
+                <option value="heal_ele">Healing & Elemental Mitigation</option>
+                <option value="support">Support / Buffs</option>
+                <option value="surv">Survivability (Overall Bulk & HTK)</option>
+                <option value="phys_surv">Physical Survivability (Phys EHP)</option>
+                <option value="arts_surv">Arts Survivability (Arts EHP)</option>
+            </select>
+        </div>
+        
+        <div class="checkbox-group">
+            <input type="checkbox" id="best-result-only" checked>
+            <label for="best-result-only">Best Config Only</label>
+        </div>
+    </div>
+
+    <div id="enemy-stats-container" style="display:none; background:rgba(0,0,0,0.25); padding:12px 16px; border-radius:6px; margin-bottom:1rem; border-left: 4px solid var(--accent-primary); font-size:0.9rem; color:var(--text-secondary);">
+        <strong style="color: #fff;">SIMULATION TARGET (<span id="target-title-label" style="color: #38bdf8;">Average Enemy</span>):</strong> 
+        <span id="es-def" style="color: #60a5fa; font-weight: bold;"></span> DEF | 
+        <span id="es-res" style="color: #f472b6; font-weight: bold;"></span> RES | 
+        <span id="es-hp" style="color: #34d399; font-weight: bold;"></span> HP | 
+        <span id="es-atk" style="color: #f87171; font-weight: bold;"></span> ATK | 
+        <span id="es-interval"></span>s Interval | 
+        <span id="es-weight"></span> Weight | 
+        Dodge: <span id="es-dodge"></span> | 
+        Immunities: <span id="es-imm"></span>
+    </div>
+    <div id="tierlist-container">
+        <!-- Tiers will be injected here -->
+        <div style="padding: 3rem; text-align: center; color: var(--text-secondary);">
+            Click "Recalculate" to generate rankings based on baseline simulations.
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <h3>RANKING ARCHITECTURE</h3>
+    <p class="text-secondary" style="font-size: 0.9rem; line-height: 1.6;">
+        The system executes a deterministic 5-minute combat simulation for every operator and skill configuration. 
+        <br><br>
+        <strong>Generalist Tier List:</strong> Evaluates operators based on their <strong>Peak Performance</strong> (highest scoring skill configuration). This view provides a macro look at operator power levels.
+        <br><br>
+        <strong>Skill-Based Ranking:</strong> A detailed technical view where every skill configuration competes independently. 
+        <br><br>
+        <strong>Scoring:</strong> Points are assigned based on normalized performance in DPS, Healing, Survivability, Support Utility, and Efficiency, plus a <strong>Rarity Base Multiplier</strong> to respect baseline power scaling between star tiers.
+    </p>
+</div>
+
+<div class="card" id="analytics-section" style="display: none;">
+    <h3>STATISTICAL CURVES</h3>
+    <div style="display: flex; gap: 20px; flex-wrap: wrap;">
+        <div style="flex: 1; min-width: 200px; max-width: 250px; max-height: 600px; overflow-y: auto; background: rgba(255,255,255,0.05); padding: 10px; border-radius: 8px;">
+            <h4 style="margin-top: 0;">Highlight Operators</h4>
+            <input type="text" id="chart-search" placeholder="Search to highlight..." style="width: 100%; margin-bottom: 10px; box-sizing: border-box;">
+            <div id="chart-checklist" style="display: flex; flex-direction: column; gap: 5px;">
+                <!-- Checkboxes populated dynamically -->
+            </div>
+        </div>
+        <div style="flex: 3; display: grid; grid-template-columns: 1fr 1fr; gap: 20px; min-width: 600px;">
+            <div style="background: rgba(0,0,0,0.2); padding: 10px; border-radius: 8px;"><canvas id="chart-total-dmg"></canvas></div>
+            <div style="background: rgba(0,0,0,0.2); padding: 10px; border-radius: 8px;"><canvas id="chart-total-skill-dmg"></canvas></div>
+            <div style="background: rgba(0,0,0,0.2); padding: 10px; border-radius: 8px;"><canvas id="chart-phys-dmg"></canvas></div>
+            <div style="background: rgba(0,0,0,0.2); padding: 10px; border-radius: 8px;"><canvas id="chart-arts-dmg"></canvas></div>
+            <div style="background: rgba(0,0,0,0.2); padding: 10px; border-radius: 8px;"><canvas id="chart-ele-dmg"></canvas></div>
+            <div style="background: rgba(0,0,0,0.2); padding: 10px; border-radius: 8px;"><canvas id="chart-true-dmg"></canvas></div>
+            <div style="background: rgba(0,0,0,0.2); padding: 10px; border-radius: 8px;"><canvas id="chart-phys-ehp"></canvas></div>
+            <div style="background: rgba(0,0,0,0.2); padding: 10px; border-radius: 8px;"><canvas id="chart-arts-ehp"></canvas></div>
+            <div style="background: rgba(0,0,0,0.2); padding: 10px; border-radius: 8px;"><canvas id="chart-heal"></canvas></div>
+            <div style="background: rgba(0,0,0,0.2); padding: 10px; border-radius: 8px;"><canvas id="chart-dp"></canvas></div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+    let allTierData = { general: [], detailed: [] };
+    let currentMode = 'general';
+let currentView = 'general';
+
+    async function fetchTierlistData() {
+        const cat = document.getElementById('target-category').value;
+        const btn = document.getElementById('refresh-tierlist');
+        btn.innerText = 'CALCULATING...';
+        btn.disabled = true;
+
+        try {
+            const response = await fetch(`/api/tierlist_data?category=${encodeURIComponent(cat)}`);
+            const data = await response.json();
+            if (response.ok) {
+                allTierData = data;
+                
+                if (data.enemy_stats) {
+                    document.getElementById('enemy-stats-container').style.display = 'block';
+                    const catNames = {
+                        'general': 'Composite Average Enemy',
+                        'normal': 'Normal Enemies',
+                        'elite': 'Elite Enemies',
+                        'boss': 'Bosses',
+                        'dp': 'DP Generation Benchmark (Pioneers, Agents & Flagbearers)',
+                        'ra': 'Reclamation Algorithm (生息演算 Horde Target)',
+                        'is': 'Integrated Strategies (集成战略 Elite Target)'
+                    };
+                    const catLabel = catNames[data.category] || data.category.toUpperCase();
+                    document.getElementById('target-title-label').innerText = catLabel;
+                    document.getElementById('es-def').innerText = Math.round(data.enemy_stats.def);
+                    document.getElementById('es-res').innerText = Math.round(data.enemy_stats.res);
+                    document.getElementById('es-hp').innerText = Math.round(data.enemy_stats.hp).toLocaleString();
+                    document.getElementById('es-atk').innerText = Math.round(data.enemy_stats.atk || 500);
+                    document.getElementById('es-interval').innerText = (data.enemy_stats.attack_interval || 3.0).toFixed(1);
+                    document.getElementById('es-weight').innerText = Math.round(data.enemy_stats.weight);
+                    
+                    let dodge = `Phys ${Math.round(data.enemy_stats.dodge_phys*100)}%, Arts ${Math.round(data.enemy_stats.dodge_arts*100)}%`;
+                    document.getElementById('es-dodge').innerText = dodge;
+                    
+                    let imm = `Stun ${Math.round(data.enemy_stats.stun_immune_ratio*100)}%, Silence ${Math.round(data.enemy_stats.silence_immune_ratio*100)}%`;
+                    document.getElementById('es-imm').innerText = imm;
+                }
+                
+                renderView();
+
+            } else {
+                alert('Error: ' + data.detail);
+            }
+        } catch (e) {
+            console.error(e);
+        } finally {
+            btn.innerText = 'RECALCULATE';
+            btn.disabled = false;
+        }
+    }
+
+    document.getElementById('refresh-tierlist').addEventListener('click', fetchTierlistData);
+    document.getElementById('target-category').addEventListener('change', fetchTierlistData);
+
+    async function deleteOperator(opId, opName) {
+        if (!confirm(`Are you sure you want to delete ${opName}? This action cannot be undone.`)) return;
+        try {
+            const res = await fetch(`/api/operators/${opId}`, { method: 'DELETE' });
+            if (res.ok) {
+                document.getElementById('refresh-tierlist').click(); // Recalculate
+            } else {
+                const err = await res.json();
+                alert(`Error: ${err.detail}`);
+            }
+        } catch (e) {
+            console.error(e);
+            alert("Failed to delete operator.");
+        }
+    }
+
+    
+
+    
+
+    document.getElementById('tierlist-search').addEventListener('input', () => {
+        renderView();
+    });
+    
+    document.getElementById('tierlist-mode').addEventListener('change', (e) => {
+        currentMode = e.target.value;
+        renderView();
+    });
+
+    document.getElementById('best-result-only').addEventListener('change', () => {
+        renderView();
+    });
+
+    document.getElementById('export-csv').addEventListener('click', () => {
+        const cat = document.getElementById('target-category').value;
+        window.location.href = `/api/tierlist/export?category=${encodeURIComponent(cat)}`;
+    });
+
+    document.getElementById('export-pdf-zip').addEventListener('click', () => {
+        const btn = document.getElementById('export-pdf-zip');
+        const origText = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerText = 'DESCARGANDO...';
+        window.location.href = '/api/tierlist/export_pdfs_zip';
+        setTimeout(() => {
+            btn.disabled = false;
+            btn.innerHTML = origText;
+        }, 3000);
+    });
+
+    function getFilteredData(dataArray) {
+        let arr = JSON.parse(JSON.stringify(dataArray));
+        const bestOnly = document.getElementById('best-result-only').checked;
+        
+        let sortField = 'score';
+        let asc = false;
+        if (currentMode === 'dp') {
+            sortField = 'dp';
+            asc = false;
+            arr = arr.filter(d => (d.dp || 0) > 0);
+        }
+        else if (currentMode === 'wave') { sortField = 'wave_ttc'; asc = true; }
+        else if (currentMode === 'boss') { sortField = 'boss_ttc'; asc = true; }
+        else if (currentMode === 'phys_dmg') { sortField = 'phys_dmg'; asc = false; }
+        else if (currentMode === 'arts_dmg') { sortField = 'arts_dmg'; asc = false; }
+        else if (currentMode === 'ele_dmg') { sortField = 'elemental_dmg'; asc = false; }
+        else if (currentMode === 'healing') { sortField = 'heal'; asc = false; }
+        else if (currentMode === 'heal_phys') { sortField = 'heal_phys'; asc = false; }
+        else if (currentMode === 'heal_arts') { sortField = 'heal_arts'; asc = false; }
+        else if (currentMode === 'heal_ele') { sortField = 'heal_ele'; asc = false; }
+        else if (currentMode === 'support') { sortField = 'support'; asc = false; }
+        else if (currentMode === 'surv') { sortField = 'surv'; asc = false; }
+        else if (currentMode === 'phys_surv') { sortField = 'phys_surv'; asc = false; }
+        else if (currentMode === 'arts_surv') { sortField = 'arts_surv'; asc = false; }
+        else { sortField = 'score'; asc = false; }
+
+        // Sort all candidates by the metric
+        arr.sort((a, b) => {
+            let valA = a[sortField] !== undefined ? a[sortField] : 0;
+            let valB = b[sortField] !== undefined ? b[sortField] : 0;
+            if (asc) {
+                let aBad = valA >= 1800 || valA <= 0;
+                let bBad = valB >= 1800 || valB <= 0;
+                if (aBad && !bBad) return 1;
+                if (!aBad && bBad) return -1;
+                if (valA === valB) return (b.score || 0) - (a.score || 0);
+                return valA - valB;
+            } else {
+                if (valA === valB) return (b.score || 0) - (a.score || 0);
+                return valB - valA;
+            }
+        });
+
+        let result = arr;
+
+        if (bestOnly) {
+            const seen = new Set();
+            result = arr.filter(d => {
+                const k = d.operator_name;
+                if (seen.has(k)) return false;
+                seen.add(k);
+                return true;
+            });
+        }
+
+        // Reassign tiers dynamically
+        if (result.length > 0) {
+            const active = [];
+            const inactive = [];
+            result.forEach(o => {
+                const v = o[sortField] !== undefined ? o[sortField] : 0;
+                if (asc) {
+                    if (v >= 1800 || v <= 0) inactive.push(o);
+                    else active.push(o);
+                } else {
+                    if (v <= 0.001) inactive.push(o);
+                    else active.push(o);
+                }
+            });
+
+            inactive.forEach(o => { o.tier = 'F'; });
+
+            const nAct = active.length;
+            if (nAct > 0) {
+                active.forEach((o, idx) => {
+                    const pct = (idx + 1) / nAct;
+                    if (pct <= 0.03) o.tier = 'OP';
+                    else if (pct <= 0.13) o.tier = 'S';
+                    else if (pct <= 0.30) o.tier = 'A';
+                    else if (pct <= 0.52) o.tier = 'B';
+                    else if (pct <= 0.74) o.tier = 'C';
+                    else if (pct <= 0.88) o.tier = 'D';
+                    else o.tier = 'E';
+                });
+            }
+        }
+
+        return result;
+    }
+
+    function renderView() {
+        const term = document.getElementById('tierlist-search').value.toLowerCase();
+        const bestOnly = document.getElementById('best-result-only').checked;
+        let rawData = (bestOnly && currentMode === 'general' && allTierData.general && allTierData.general.length > 0)
+            ? allTierData.general
+            : (allTierData.detailed || allTierData.general || []);
+        
+        let data = getFilteredData(rawData);
+
+        if (term) {
+            data = data.filter(o => 
+                (o.operator_name && o.operator_name.toLowerCase().includes(term)) ||
+                (o.skill_name && o.skill_name.toLowerCase().includes(term)) ||
+                (o.module_name && o.module_name.toLowerCase().includes(term)) ||
+                (o.subclass_name && o.subclass_name.toLowerCase().includes(term))
+            );
+        }
+
+        const container = document.getElementById('tierlist-container');
+        if (!data || data.length === 0) {
+            if (allTierData.general && allTierData.general.length > 0) {
+                container.innerHTML = '<div style="padding: 3rem; text-align: center; color: var(--text-secondary);">No results match your search or filters.</div>';
+            }
+            return;
+        }
+
+        const tiers = ['OP', 'S', 'A', 'B', 'C', 'D', 'E', 'F'];
+        
+        let html = '';
+        tiers.forEach(t => {
+            const opInTier = data.filter(o => o.tier === t);
+            if (opInTier.length > 0) {
+                html += `
+                    <div class="tier-row">
+                        <div class="tier-label tier-${t}">${t}</div>
+                        <div class="tier-content">
+                            ${opInTier.map(o => {
+                                let metricLabel = "OVERALL SCORE";
+                                let metricVal = (o.score || 0).toFixed(1);
+
+                                if (currentMode === 'dp') { metricLabel = "TOTAL DP"; metricVal = `${Math.round(o.dp || 0)} DP (${((o.dp || 0)/300).toFixed(2)}/s)`; }
+                                else if (currentMode === 'wave') { metricLabel = "WAVE TTC"; metricVal = `${(o.wave_ttc ? o.wave_ttc.toFixed(1) : 1800)}s`; }
+                                else if (currentMode === 'boss') { metricLabel = "BOSS TTC"; metricVal = `${(o.boss_ttc ? o.boss_ttc.toFixed(1) : 1800)}s`; }
+                                else if (currentMode === 'phys_dmg') { metricLabel = "PHYS DPS"; metricVal = Math.round(o.phys_dmg ? o.phys_dmg / 300 : 0).toLocaleString(); }
+                                else if (currentMode === 'arts_dmg') { metricLabel = "ARTS DPS"; metricVal = Math.round(o.arts_dmg ? o.arts_dmg / 300 : 0).toLocaleString(); }
+                                else if (currentMode === 'ele_dmg') { metricLabel = "ELE DPS"; metricVal = Math.round(o.elemental_dmg ? o.elemental_dmg / 300 : 0).toLocaleString(); }
+                                else if (currentMode === 'healing') { metricLabel = "HEAL / SEC"; metricVal = Math.round(o.heal ? o.heal / 300 : 0).toLocaleString(); }
+                                else if (currentMode === 'heal_phys') { metricLabel = "PHYS HEAL & MIT"; metricVal = Math.round(o.heal_phys ? o.heal_phys / 300 : 0).toLocaleString(); }
+                                else if (currentMode === 'heal_arts') { metricLabel = "ARTS HEAL & MIT"; metricVal = Math.round(o.heal_arts ? o.heal_arts / 300 : 0).toLocaleString(); }
+                                else if (currentMode === 'heal_ele') { metricLabel = "ELE HEAL & MIT"; metricVal = Math.round(o.heal_ele ? o.heal_ele / 300 : 0).toLocaleString(); }
+                                else if (currentMode === 'support') { metricLabel = "SUPPORT SCORE"; metricVal = (o.support || 0).toFixed(1); }
+                                else if (currentMode === 'surv') { metricLabel = "SURVIVABILITY"; metricVal = Math.round(o.surv || 0).toLocaleString(); }
+                                else if (currentMode === 'phys_surv') { metricLabel = "PHYS EHP"; metricVal = Math.round(o.phys_surv || 0).toLocaleString(); }
+                                else if (currentMode === 'arts_surv') { metricLabel = "ARTS EHP"; metricVal = Math.round(o.arts_surv || 0).toLocaleString(); }
+
+                                const totalDps = (o.total_dmg ? o.total_dmg : ((o.phys_dmg || 0) + (o.arts_dmg || 0) + (o.elemental_dmg || 0) + (o.true_dmg || 0))) / 300.0;
+                                const skTag = o.skill_tag || (o.skill_name === 'RAW' ? 'RAW' : 'S1');
+                                const modTag = o.module_tag || (o.module_name && o.module_name !== 'No Module' ? 'MOD' : 'NO MOD');
+
+                                return `
+                                    <div class="op-mini-card" title="Skill: ${o.skill_name} | Module: ${o.module_name} | Score: ${(o.score||0).toFixed(2)}">
+                                        <span class="op-rarity-badge stars-${o.rarity}">${o.rarity}★</span>
+                                        <button class="delete-btn mini-card-delete" onclick="event.stopPropagation(); deleteOperator(${o.operator_id}, '${o.operator_name}')" title="Delete Operator">✖</button>
+                                        
+                                        <div class="op-header-row">
+                                            <img class="op-portrait" src="/static/images/${o.photo_path}?v={{ version }}" onerror="this.src='/static/images/placeholder.webp'" alt="${o.operator_name}">
+                                            <div class="op-title-block">
+                                                <div class="op-name" title="${o.operator_name}">${o.operator_name}</div>
+                                                <div class="op-subclass" title="${o.profession || 'WARRIOR'} - ${o.subclass_name || 'Unknown'}">${o.profession || "WARRIOR"} • ${o.subclass_name || "Unknown"}</div>
+                                            </div>
+                                        </div>
+                                        
+                                        <div class="config-tags-row">
+                                            <span class="config-tag skill-pill" title="Skill: ${o.skill_name}">${skTag}</span>
+                                            <span class="config-tag mod-pill ${modTag === 'NO MOD' ? 'no-mod' : ''}" title="Module: ${o.module_name}">${modTag}</span>
+                                        </div>
+
+                                        <div class="op-score-pill">
+                                            <span>${metricLabel}</span>
+                                            <span class="op-score-val">${metricVal}</span>
+                                        </div>
+
+                                        <div class="op-stat-grid">
+                                            <div class="op-stat-item">DPS: <span>${Math.round(totalDps)}</span></div>
+                                            <div class="op-stat-item">SURV: <span>${Math.round(o.surv || 0).toLocaleString()}</span></div>
+                                            <div class="op-stat-item">HTK: <span>${(o.hits_to_kill || 0).toFixed(1)}</span></div>
+                                            <div class="op-stat-item">BLK: <span>${Math.round(o.block || 1)}</span></div>
+                                            <div class="op-stat-item">HPS: <span>${Math.round((o.heal || 0) / 300)}</span></div>
+                                            <div class="op-stat-item">${(o.dp && o.dp > 0) ? `DP: <span>${Math.round(o.dp)}</span>` : `TTC: <span>${o.boss_ttc ? Math.round(o.boss_ttc) + 's' : (o.wave_ttc ? Math.round(o.wave_ttc) + 's' : '-')}</span>`}</div>
+                                        </div>
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+        });
+        container.innerHTML = html;
+
+        // Update the count in the header
+        const uniqueOpsCount = new Set(data.map(d => d.operator_name)).size;
+        if (bestOnly) {
+            document.getElementById('op-count-span').innerText = `(${uniqueOpsCount} Operators)`;
+        } else {
+            document.getElementById('op-count-span').innerText = `(${data.length} Variations • ${uniqueOpsCount} Operators)`;
+        }
+
+        // Render Analytics Charts
+        document.getElementById('analytics-section').style.display = 'block';
+        updateChecklist(data);
+        renderCharts(data);
+    }
+
+    let selectedOperatorsForChart = new Set();
+    const chartInstances = {};
+
+    function updateChecklist(data) {
+        const checklistContainer = document.getElementById('chart-checklist');
+        const term = document.getElementById('chart-search').value.toLowerCase();
+        
+        // Extract unique operators (important for detailed view where same operator appears multiple times)
+        const uniqueOps = [];
+        const seen = new Set();
+        data.forEach(d => {
+            const id = d.operator_name; // Always group checklist by operator name
+            if (!seen.has(id)) {
+                seen.add(id);
+                uniqueOps.push({ id: id, name: d.operator_name });
+            }
+        });
+
+        uniqueOps.sort((a, b) => a.id.localeCompare(b.id));
+
+        let html = '';
+        uniqueOps.forEach(op => {
+            if (term && !op.id.toLowerCase().includes(term)) return;
+            const isChecked = selectedOperatorsForChart.has(op.id) ? 'checked' : '';
+            html += `
+                <label style="font-size: 0.8rem; display: flex; align-items: center; gap: 5px; cursor: pointer;">
+                    <input type="checkbox" value="${op.id}" class="op-chart-checkbox" ${isChecked}>
+                    <span>${op.id}</span>
+                </label>
+            `;
+        });
+        checklistContainer.innerHTML = html;
+
+        document.querySelectorAll('.op-chart-checkbox').forEach(cb => {
+            cb.addEventListener('change', (e) => {
+                if (e.target.checked) selectedOperatorsForChart.add(e.target.value);
+                else selectedOperatorsForChart.delete(e.target.value);
+                renderCharts(getFilteredData(currentMode === 'general' ? allTierData.general : allTierData.detailed));
+            });
+        });
+    }
+
+    document.getElementById('chart-search').addEventListener('input', () => {
+        updateChecklist(getFilteredData(currentMode === 'general' ? allTierData.general : allTierData.detailed));
+    });
+
+    function generateCDF(data, statKey) {
+        const sorted = data.map(d => {
+            const id = currentMode === 'general' ? d.operator_name : `${d.operator_name} (${d.skill_name} + ${d.module_name})`;
+            return { id: id, name: d.operator_name, value: parseFloat(d[statKey]) || 0 };
+        }).filter(d => d.value > 0).sort((a, b) => a.value - b.value);
+        
+        const lineData = [];
+        const scatterData = [];
+
+        // Precompute percentiles handling ties
+        for (let i = 0; i < sorted.length; i++) {
+            // Find the last index of this value to give identical values the same percentile
+            let lastIndex = i;
+            while (lastIndex + 1 < sorted.length && sorted[lastIndex + 1].value === sorted[i].value) {
+                lastIndex++;
+            }
+            
+            const pt = { x: sorted[i].value, y: ((lastIndex + 1) / sorted.length) * 100 };
+            lineData.push(pt);
+            
+            if (selectedOperatorsForChart.has(sorted[i].name)) {
+                scatterData.push({ x: pt.x, y: pt.y, rawLabel: sorted[i].id });
+            }
+        }
+        return { lineData, scatterData };
+    }
+
+    function drawChart(canvasId, title, data, statKey, color) {
+        const ctx = document.getElementById(canvasId).getContext('2d');
+        const cdf = generateCDF(data, statKey);
+
+        if (chartInstances[canvasId]) {
+            chartInstances[canvasId].destroy();
+        }
+
+        chartInstances[canvasId] = new Chart(ctx, {
+            type: 'line',
+            data: {
+                datasets: [
+                    {
+                        label: 'Population CDF',
+                        data: cdf.lineData,
+                        borderColor: color,
+                        backgroundColor: color + '33', // 20% opacity
+                        fill: true,
+                        pointRadius: 0,
+                        pointHoverRadius: 4,
+                        stepped: 'before'
+                    },
+                    {
+                        type: 'scatter',
+                        label: 'Selected',
+                        data: cdf.scatterData,
+                        backgroundColor: '#ffaa00',
+                        borderColor: '#ffffff',
+                        borderWidth: 1,
+                        pointRadius: 6,
+                        pointHoverRadius: 8
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                layout: {
+                    padding: {
+                        top: 10,
+                        right: 20
+                    }
+                },
+                plugins: {
+                    title: { display: true, text: title, color: '#ffffff' },
+                    legend: { labels: { color: '#ffffff' } },
+                    tooltip: {
+                        callbacks: {
+                            label: function(context) {
+                                if (context.dataset.type === 'scatter') {
+                                    const lbl = context.raw.rawLabel;
+                                    return `${lbl}: ${context.raw.x.toFixed(1)} (${context.raw.y.toFixed(1)}%)`;
+                                }
+                                return `Value: ${context.raw.x.toFixed(1)} (${context.raw.y.toFixed(1)}%)`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        type: 'linear',
+                        title: { display: true, text: 'Value', color: '#aaaaaa' },
+                        ticks: { color: '#aaaaaa' },
+                        grid: { color: '#333333' },
+                        grace: '5%'
+                    },
+                    y: {
+                        title: { display: true, text: 'Percentile (%)', color: '#aaaaaa' },
+                        min: 0, max: 105,
+                        ticks: { color: '#aaaaaa' },
+                        grid: { color: '#333333' }
+                    }
+                }
+            }
+        });
+    }
+
+    function renderCharts(data) {
+        if (!data || data.length === 0) return;
+        
+        Chart.defaults.color = '#ffffff';
+
+        drawChart('chart-total-dmg', 'Total Damage CDF', data, 'total_dmg', '#e74c3c');
+        drawChart('chart-total-skill-dmg', 'Total Skill Damage CDF', data, 'total_skill_damage', '#ff00ff');
+        drawChart('chart-phys-dmg', 'Physical Damage CDF', data, 'phys_dmg', '#e67e22');
+        drawChart('chart-arts-dmg', 'Arts Damage CDF', data, 'arts_dmg', '#9b59b6');
+        drawChart('chart-ele-dmg', 'Elemental Damage CDF', data, 'elemental_dmg', '#ff5722');
+        drawChart('chart-true-dmg', 'True Damage CDF', data, 'true_dmg', '#f1c40f');
+        drawChart('chart-phys-ehp', 'Physical eHP CDF', data, 'phys_surv', '#3498db');
+        drawChart('chart-arts-ehp', 'Arts eHP CDF', data, 'arts_surv', '#1abc9c');
+        drawChart('chart-heal', 'Healing CDF', data, 'heal', '#2ecc71');
+        drawChart('chart-dp', 'DP Generation CDF', data, 'dp', '#f39c12');
+    }
+</script>
+<style>
+    .tabs {
+        display: flex;
+        gap: 10px;
+        border-bottom: 1px solid rgba(255,255,255,0.1);
+    }
+    .tab-btn {
+        background: none;
+        border: none;
+        color: var(--text-secondary);
+        padding: 10px 20px;
+        cursor: pointer;
+        font-weight: bold;
+        transition: 0.2s;
+        border-bottom: 2px solid transparent;
+    }
+    .tab-btn.active {
+        color: var(--accent);
+        border-bottom-color: var(--accent);
+    }
+    .tab-btn:hover {
+        color: var(--text-primary);
+    }
+    .config-label {
+        font-size: 0.65rem;
+        color: var(--accent);
+        text-transform: uppercase;
+        margin-top: 2px;
+        max-width: 100%;
+        line-height: 1.1;
+    }
+    .rarity-badge {
+        position: absolute;
+        top: 2px;
+        right: 2px;
+        font-size: 0.6rem;
+        padding: 1px 4px;
+        border-radius: 3px;
+        background: rgba(0,0,0,0.6);
+        z-index: 1;
+    }
+    .stars-6 { color: #ff7e00; }
+    .stars-5 { color: #ffb400; }
+    .stars-4 { color: #dbb1ff; }
+    .stars-3 { color: #00b4ff; }
+    .stars-2 { color: #d6e200; }
+    .stars-1 { color: #fff; }
+</style>
+{% endblock %}

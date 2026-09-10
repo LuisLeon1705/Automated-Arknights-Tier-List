@@ -1,0 +1,529 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - Arknights Analytics{% endblock %}
+
+{% block head %}
+<script>
+    // Embed operator data for dynamic JS updates
+    const ALL_OPERATORS = {{ operators | tojson | safe }};
+</script>
+{% endblock %}
+
+{% block content %}
+<div class="dashboard-grid">
+    <!-- Sidebar Controls -->
+    <div class="sidebar">
+        <div class="card">
+            <div class="op-photo-container" id="op-photo-box">
+                <div class="text-secondary" style="font-size: 0.8rem;">NO IMAGE</div>
+            </div>
+
+            <h3>OPERATOR CONFIG ({{ operators|length }} Added)</h3>
+            <div style="margin-top: 15px;">
+                <div class="form-group">
+                    <label>Operator</label>
+                    <input type="text" class="custom-select-search" placeholder="Search operator..." id="select-search" style="margin-bottom: 5px;">
+                    <div class="custom-select-container" id="op-custom-select">
+                        <div class="custom-select-header" id="select-header">
+                            <div style="display:flex; align-items:center;">
+                                <img src="/static/images/placeholder.webp" id="header-img" style="display:none; width:24px; height:24px; margin-right:10px;">
+                                <span id="header-text">Select Operator</span>
+                            </div>
+                            <span>▼</span>
+                        </div>
+                        <div class="custom-select-dropdown" id="select-dropdown">
+                            <div id="select-items">
+                                {% for op in operators %}
+                                <div class="custom-select-item" data-name="{{ op.name }}" data-img="{{ op.photo_path }}">
+                                    <div style="display:flex; align-items:center;">
+                                        <img src="/static/images/{{ op.photo_path }}" onerror="this.src='/static/images/placeholder.webp'" style="width:32px; height:32px; margin-right:10px; border-radius:4px;">
+                                        <span>{{ op.name }}</span>
+                                    </div>
+                                    <button class="delete-btn list-delete-btn" onclick="event.stopPropagation(); deleteOperator({{ op.operator_id }}, '{{ op.name }}')">🗑️</button>
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    </div>
+                    <input type="hidden" id="op-select-val" value="">
+                </div>
+
+                <div class="form-group">
+                    <label for="skill-select">Skill</label>
+                    <select id="skill-select">
+                        <option value="-1">RAW (No Skill)</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="module-select">Module</label>
+                    <select id="module-select">
+                        <option value="-1">None</option>
+                    </select>
+                </div>
+
+                <div class="checkbox-group">
+                    <input type="checkbox" id="check-potentials" checked>
+                    <label for="check-potentials">Apply Potentials</label>
+                </div>
+
+                <div class="checkbox-group">
+                    <input type="checkbox" id="check-trust" checked>
+                    <label for="check-trust">Apply Trust</label>
+                </div>
+
+                <button id="add-comparison" style="width: 100%; border-color: var(--accent);">ADD TO COMPARISON</button>
+
+                <div class="comparison-pool" id="comp-pool">
+                    <h4 class="text-small" style="margin-bottom: 10px;">PARTICIPANTS</h4>
+                    <div id="pool-list"></div>
+                </div>
+
+                <div style="margin-top: 20px; padding-top: 15px; border-top: 1px solid var(--border-color);">
+                    <h4 class="text-small" style="margin-bottom: 10px;">GLOBAL ENEMY STATS</h4>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                        <div class="form-group">
+                            <label for="global-target-def">DEF</label>
+                            <input type="number" id="global-target-def" value="0">
+                        </div>
+                        <div class="form-group">
+                            <label for="global-target-res">RES</label>
+                            <input type="number" id="global-target-res" value="0">
+                        </div>
+                    </div>
+                </div>
+
+                <button id="run-sim" class="primary" style="width: 100%; margin-top: 20px;">RUN SIMULATION</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Content (Graphs Grid) -->
+    <div class="main-content">
+        <div class="graphs-grid">
+            <div class="graph-card">
+                <h4>Cumulative Damage</h4>
+                <div class="svg-container" id="graph-damage"></div>
+            </div>
+            <div class="graph-card">
+                <h4>Cumulative Healing</h4>
+                <div class="svg-container" id="graph-healing"></div>
+            </div>
+            <div class="graph-card">
+                <h4>DP Generation</h4>
+                <div class="svg-container" id="graph-dp"></div>
+            </div>
+            <div class="graph-card">
+                <h4>Instant Damage (Bars)</h4>
+                <div class="svg-container" id="graph-damage_events"></div>
+            </div>
+            <div class="graph-card">
+                <h4>Instant Healing (Bars)</h4>
+                <div class="svg-container" id="graph-healing_events"></div>
+            </div>
+            <div class="graph-card">
+                <h4>Total Skill Damage</h4>
+                <div class="svg-container" id="graph-total_skill_damage"></div>
+            </div>
+            <div class="graph-card">
+                <h4>Average DPS</h4>
+                <div class="svg-container" id="graph-dps_avg"></div>
+            </div>
+            <div class="graph-card">
+                <h4>Average HPS</h4>
+                <div class="svg-container" id="graph-hps_avg"></div>
+            </div>
+            <div class="graph-card">
+                <h4>Arts Survival (EHP)</h4>
+                <div class="svg-container" id="graph-arts_surv"></div>
+            </div>
+            <div class="graph-card">
+                <h4>Phys Survival (EHP)</h4>
+                <div class="svg-container" id="graph-phys_surv"></div>
+            </div>
+        </div>
+        
+        <div id="analytics-section" style="display:none;">
+            <div class="card stats-table-container">
+                <h3>STAT ANALYTICS (ACTIVE STATE)</h3>
+                <table class="stats-table">
+                    <thead>
+                        <tr>
+                            <th>Photo</th>
+                            <th>Operator (State)</th>
+                            <th>HP</th>
+                            <th>ATK</th>
+                            <th>DEF</th>
+                            <th>RES</th>
+                            <th>ASPD</th>
+                            <th>Interval</th>
+                        </tr>
+                    </thead>
+                    <tbody id="stats-tbody"></tbody>
+                </table>
+            </div>
+
+            <div class="card" id="results-table-card" style="margin-top: 2rem;">
+                <h3>COMPARISON SUMMARY (TOTALS)</h3>
+                <table id="results-table" style="margin-top: 1rem;">
+                    <thead>
+                        <tr>
+                            <th>Photo</th>
+                            <th>Operator</th>
+                            <th>Total DMG</th>
+                            <th>Total Heal</th>
+                            <th>Total DP</th>
+                            <th>Phys EHP</th>
+                            <th>Arts EHP</th>
+                        </tr>
+                    </thead>
+                    <tbody id="results-tbody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    const VERSION = "{{ version }}";
+    const participants = [];
+    const colors = ['#ff3e3e', '#2196F3', '#4CAF50', '#FFEB3B', '#E91E63', '#9C27B0'];
+
+    // Custom Select Logic
+    const selectHeader = document.getElementById('select-header');
+    const selectDropdown = document.getElementById('select-dropdown');
+    const selectSearch = document.getElementById('select-search');
+    const selectItems = document.getElementById('select-items');
+    const hiddenVal = document.getElementById('op-select-val');
+
+    selectHeader.addEventListener('click', () => {
+        selectDropdown.classList.toggle('show');
+        if (selectDropdown.classList.contains('show')) selectSearch.focus();
+    });
+
+    async function deleteOperator(opId, opName) {
+        if (!confirm(`Are you sure you want to delete ${opName}? This action cannot be undone.`)) return;
+        
+        try {
+            const res = await fetch(`/api/operators/${opId}`, { method: 'DELETE' });
+            if (res.ok) {
+                location.reload();
+            } else {
+                const err = await res.json();
+                alert(`Error: ${err.detail}`);
+            }
+        } catch (e) {
+            console.error(e);
+            alert("Failed to delete operator.");
+        }
+    }
+
+    selectSearch.addEventListener('input', (e) => {
+        const term = e.target.value.toLowerCase();
+        if (!selectDropdown.classList.contains('show')) selectDropdown.classList.add('show');
+        
+        Array.from(selectItems.children).forEach(item => {
+            const name = item.dataset.name.toLowerCase();
+            item.style.display = name.includes(term) ? 'flex' : 'none';
+        });
+    });
+
+    selectItems.addEventListener('click', (e) => {
+        const item = e.target.closest('.custom-select-item');
+        if (!item) return;
+
+        const name = item.dataset.name;
+        const img = item.dataset.img;
+
+        document.getElementById('header-text').innerText = name;
+        const hImg = document.getElementById('header-img');
+        hImg.src = img ? '/static/images/' + img : '/static/images/placeholder.webp';
+        hImg.style.display = 'block';
+        
+        hiddenVal.value = name;
+        selectDropdown.classList.remove('show');
+
+        // Update main photo box
+        const photoBox = document.getElementById('op-photo-box');
+        photoBox.innerHTML = `<img src="${hImg.src}" onerror="this.parentElement.innerHTML='<div class=\'text-secondary\'>NO IMAGE</div>'">`;
+
+        const opData = ALL_OPERATORS.find(o => o.name === name);
+
+        // DYNAMIC MODULES
+        const moduleSelect = document.getElementById('module-select');
+        moduleSelect.innerHTML = '<option value="-1">None</option>';
+        if (opData && opData.modules) {
+            opData.modules.forEach((mod, idx) => {
+                const opt = document.createElement('option');
+                opt.value = idx;
+                opt.innerText = mod.name || `Module ${idx + 1}`;
+                moduleSelect.appendChild(opt);
+            });
+        }
+
+        // DYNAMIC SKILLS
+        const skillSelect = document.getElementById('skill-select');
+        skillSelect.innerHTML = '<option value="-1">RAW (No Skill)</option>';
+        if (opData && opData.skills) {
+            opData.skills.forEach((skill, idx) => {
+                const opt = document.createElement('option');
+                opt.value = idx;
+                opt.innerText = `Skill ${idx + 1}: ${skill.name || ''}`;
+                skillSelect.appendChild(opt);
+            });
+        }
+    });
+
+    document.addEventListener('click', (e) => {
+        if (!document.getElementById('op-custom-select').contains(e.target)) {
+            selectDropdown.classList.remove('show');
+        }
+    });
+
+    document.getElementById('add-comparison').addEventListener('click', () => {
+        const opName = hiddenVal.value;
+        if (!opName) return;
+
+        const config = {
+            operator_name: opName,
+            skill_index: parseInt(document.getElementById('skill-select').value),
+            module_index: parseInt(document.getElementById('module-select').value),
+            target_def: parseInt(document.getElementById('global-target-def').value),
+            target_res: parseInt(document.getElementById('global-target-res').value),
+            apply_potentials: document.getElementById('check-potentials').checked
+        };
+
+        participants.push(config);
+        updatePoolUI();
+    });
+
+    function updatePoolUI() {
+        const list = document.getElementById('pool-list');
+        list.innerHTML = participants.map((p, i) => `
+            <div class="participant-tag">
+                <span>${p.operator_name} (${p.skill_index === -1 ? 'RAW' : 'S'+(p.skill_index+1)})</span>
+                <span class="remove" onclick="removeParticipant(${i})">✖</span>
+            </div>
+        `).join('');
+    }
+
+    window.removeParticipant = (index) => {
+        participants.splice(index, 1);
+        updatePoolUI();
+    };
+
+    document.getElementById('run-sim').addEventListener('click', async () => {
+        if (participants.length === 0) {
+            alert('Add at least one operator to compare.');
+            return;
+        }
+
+        document.getElementById('run-sim').innerText = 'SIMULATING...';
+        document.getElementById('run-sim').disabled = true;
+
+        try {
+            const response = await fetch('/api/simulate_batch', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    configs: participants,
+                    global_target_def: parseInt(document.getElementById('global-target-def').value) || 0,
+                    global_target_res: parseInt(document.getElementById('global-target-res').value) || 0
+                })
+            });
+
+            const data = await response.json();
+            console.log("Sim Results:", data); 
+            if (response.ok) {
+                document.getElementById('analytics-section').style.display = 'block';
+                renderAllGraphs(data.results);
+                updateResultsTable(data.results);
+                updateStatsTable(data.results);
+            } else {
+                alert('Error: ' + data.detail);
+            }
+        } catch (e) {
+            console.error(e);
+        } finally {
+            document.getElementById('run-sim').innerText = 'RUN SIMULATION';
+            document.getElementById('run-sim').disabled = false;
+        }
+    });
+
+    function updateResultsTable(results) {
+        const tbody = document.getElementById('results-tbody');
+        tbody.innerHTML = results.map((r, i) => `
+            <tr>
+                <td><img src="/static/images/${r.summary.photo_path}" onerror="this.src='/static/images/placeholder.webp'" style="width:30px; height:30px; background:#000;"></td>
+                <td>
+                    <strong style="color:${colors[i % colors.length]}">${r.operator_name}</strong><br>
+                    <small class="text-secondary">${r.skill_name} | ${r.module_name}</small><br>
+                    <small class="text-secondary" style="font-size:0.7rem;">[${r.state_name}]</small>
+                </td>
+                <td>${Math.round(r.summary.total_damage).toLocaleString()}</td>
+                <td>${Math.round(r.summary.total_healing).toLocaleString()}</td>
+                <td>${Math.round(r.summary.total_dp).toLocaleString()}</td>
+                <td>${Math.round(r.summary.ehp_phys).toLocaleString()}</td>
+                <td>${Math.round(r.arts_surv).toLocaleString()}</td>
+            </tr>
+        `).join('');
+    }
+
+    function updateStatsTable(results) {
+        const tbody = document.getElementById('stats-tbody');
+        tbody.innerHTML = results.map((r, i) => `
+            <tr>
+                <td><img src="/static/images/${r.summary.photo_path}?v=${VERSION}" onerror="this.src='/static/images/placeholder.webp'" style="width:30px; height:30px; background:#000;"></td>
+                <td>
+                    <strong style="color:${colors[i % colors.length]}">${r.operator_name}</strong><br>
+                    <small class="text-secondary">${r.skill_name} | ${r.module_name}</small>
+                </td>
+                <td>${r.final_stats.hp}</td>
+                <td>${r.final_stats.atk}</td>
+                <td>${r.final_stats.def}</td>
+                <td>${r.final_stats.res}</td>
+                <td>${r.final_stats.aspd}</td>
+                <td>${r.final_stats.interval}s</td>
+            </tr>
+        `).join('');
+    }
+
+    function renderAllGraphs(results) {
+        ['damage', 'healing', 'dp'].forEach(type => {
+            drawMultiGraph(`graph-${type}`, results, type, false);
+        });
+        
+        drawSimpleBarChart('graph-damage_events', results, 'damage_events');
+        drawSimpleBarChart('graph-healing_events', results, 'healing_events');
+
+        drawSummaryBarChart('graph-total_skill_damage', results, 'total_skill_damage', false);
+        drawSummaryBarChart('graph-dps_avg', results, 'dps', false);
+        drawSummaryBarChart('graph-hps_avg', results, 'hps', false);
+        drawSummaryBarChart('graph-arts_surv', results, 'arts_surv', true);
+        drawSummaryBarChart('graph-phys_surv', results, 'phys_surv', true);
+    }
+
+    function drawSummaryBarChart(containerId, results, metric, isRootLevel = false) {
+        const box = document.getElementById(containerId);
+        let globalMax = 0;
+        results.forEach(r => {
+            const val = isRootLevel ? r[metric] : r.summary[metric];
+            if (val > globalMax) globalMax = val;
+        });
+
+        if (globalMax === 0) {
+            box.innerHTML = `<div class="text-secondary text-small" style="position:absolute; top:45%; left:30%;">No Data</div>`;
+            return;
+        }
+
+        let html = `<div class="simple-bar-chart" style="--line-count: 5;">`;
+        results.forEach((r, i) => {
+            const val = isRootLevel ? r[metric] : r.summary[metric];
+            const pct = (val / globalMax) * 100;
+            const color = colors[i % colors.length];
+            
+            if (val > 0) {
+                html += `
+                <div class="item" style="--clr: ${color}; --val: ${Math.max(0, pct)}">
+                    <div class="label" style="font-size:0.6rem;">${r.operator_name}<br>(${r.skill_name})</div>
+                    <div class="value">${Math.round(val).toLocaleString()}</div>
+                </div>`;
+            }
+        });
+        html += `</div>`;
+        box.innerHTML = html;
+    }
+
+    function drawSimpleBarChart(containerId, results, dataType) {
+        const box = document.getElementById(containerId);
+        
+        let globalMax = 0;
+        const maxes = results.map(r => {
+            const m = (r[dataType] && r[dataType].length > 0) ? Math.max(...r[dataType].map(p => p[1])) : 0;
+            if (m > globalMax) globalMax = m;
+            return m;
+        });
+
+        if (globalMax === 0) {
+            box.innerHTML = `<div class="text-secondary text-small" style="position:absolute; top:45%; left:30%;">No Data</div>`;
+            return;
+        }
+
+        let html = `<div class="simple-bar-chart" style="--line-count: 5;">`;
+        results.forEach((r, i) => {
+            const val = maxes[i];
+            const pct = (val / globalMax) * 100;
+            const heightPct = Math.max(0, pct);
+            const color = colors[i % colors.length];
+            
+            html += `
+                <div class="item" style="--clr: ${color}; --val: ${heightPct}">
+                    <div class="label" style="font-size:0.6rem;">${r.operator_name}<br>(${r.skill_name})</div>
+                    <div class="value">${Math.round(val).toLocaleString()}</div>
+                </div>`;
+        });
+        html += `</div>`;
+        box.innerHTML = html;
+    }
+
+    function drawMultiGraph(containerId, results, dataType, isBar = false) {
+        const box = document.getElementById(containerId);
+        const width = box.clientWidth;
+        
+        let globalMax = 0;
+        results.forEach(r => {
+            if (r[dataType] && r[dataType].length > 0) {
+                const m = Math.max(...r[dataType].map(p => p[1]));
+                if (m > globalMax) globalMax = m;
+            }
+        });
+        globalMax = globalMax || 1;
+        const maxTime = 300;
+
+        const height = 300;
+        const paddingLeft = 70; 
+        const paddingRight = 40;
+        const paddingTop = 40;
+        const paddingBottom = 50;
+        
+        let svg = `<svg width="${width}" height="${height}" style="overflow: visible;">`;
+
+        for (let i = 0; i <= 5; i++) {
+            const val = (globalMax / 5) * i;
+            const y = (height - paddingBottom) - (i / 5) * (height - paddingTop - paddingBottom);
+            svg += `<line x1="${paddingLeft}" y1="${y}" x2="${width - paddingRight}" y2="${y}" class="grid-line" />`;
+            svg += `<text x="${paddingLeft - 8}" y="${y + 3}" class="axis-text" text-anchor="end">${Math.round(val).toLocaleString()}</text>`;
+        }
+
+        for (let i = 0; i <= 6; i++) {
+            const time = (maxTime / 6) * i;
+            const x = paddingLeft + (i / 6) * (width - paddingLeft - paddingRight);
+            svg += `<text x="${x}" y="${height - paddingBottom + 20}" class="axis-text" text-anchor="middle">${Math.round(time)}s</text>`;
+        }
+
+        svg += `<line x1="${paddingLeft}" y1="${paddingTop}" x2="${paddingLeft}" y2="${height - paddingBottom}" class="axis-line" />`;
+        svg += `<line x1="${paddingLeft}" y1="${height - paddingBottom}" x2="${width - paddingRight}" y2="${height - paddingBottom}" class="axis-line" />`;
+
+        results.forEach((r, i) => {
+            const color = colors[i % colors.length];
+            const localMax = (r[dataType] && r[dataType].length > 0) ? Math.max(...r[dataType].map(p => p[1])) : 0;
+            
+            if (r[dataType] && r[dataType].length > 0) {
+                const points = r[dataType].map(p => {
+                    const x = paddingLeft + (p[0] / maxTime) * (width - paddingLeft - paddingRight);
+                    const y = (height - paddingBottom) - (p[1] / globalMax) * (height - paddingTop - paddingBottom);
+                    return `${x},${y}`;
+                }).join(' ');
+                svg += `<polyline points="${points}" fill="none" stroke="${color}" stroke-width="2" style="stroke-dasharray: 2000; stroke-dashoffset: 2000; animation: drawLine 3s ease-out forwards;" />`;
+            }
+            
+            svg += `<text x="${width - paddingRight}" y="${paddingTop - 25 + (i * 12)}" fill="${color}" text-anchor="end" font-size="9" font-weight="bold">${r.operator_name} (${r.skill_name} | ${r.module_name}): ${Math.round(localMax).toLocaleString()}</text>`;
+        });
+
+        svg += `</svg>`;
+        box.innerHTML = svg;
+    }
+</script>
+{% endblock %}

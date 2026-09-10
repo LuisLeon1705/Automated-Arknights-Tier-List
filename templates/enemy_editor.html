@@ -1,0 +1,529 @@
+{% extends "base.html" %}
+
+{% block title %}Enemy Editor - Arknights Analytics{% endblock %}
+
+{% block content %}
+<style>
+.editor-layout {
+    display: flex;
+    gap: 20px;
+    min-height: calc(100vh - 160px);
+}
+.sidebar-list {
+    flex: 1;
+    min-width: 320px;
+    max-width: 380px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+.sidebar-header {
+    padding: 15px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+.enemy-items {
+    flex: 1;
+    overflow-y: auto;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 700px;
+}
+.enemy-item {
+    padding: 10px 12px;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid transparent;
+    border-radius: 6px;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    transition: all 0.15s ease;
+}
+.enemy-item:hover {
+    background: rgba(255,255,255,0.08);
+    border-color: rgba(255,255,255,0.2);
+}
+.enemy-item.active {
+    background: rgba(0, 150, 255, 0.15);
+    border-color: var(--accent-primary);
+}
+.badge {
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: bold;
+    text-transform: uppercase;
+}
+.badge-normal { background: rgba(50, 205, 50, 0.2); color: #4ade80; border: 1px solid rgba(50,205,50,0.4); }
+.badge-elite { background: rgba(255, 193, 7, 0.2); color: #facc15; border: 1px solid rgba(255,193,7,0.4); }
+.badge-boss { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239,68,68,0.4); }
+
+.editor-form-card {
+    flex: 2;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 25px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+.form-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 15px;
+}
+.form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.form-group label {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.form-group input, .form-group select {
+    padding: 10px;
+    background: rgba(0,0,0,0.3);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-primary);
+    font-size: 0.95rem;
+}
+.form-group input:focus, .form-group select:focus {
+    border-color: var(--accent-primary);
+    outline: none;
+}
+.checkbox-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+    padding: 12px;
+    background: rgba(0,0,0,0.2);
+    border-radius: 6px;
+    border: 1px solid rgba(255,255,255,0.05);
+}
+.checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.85rem;
+    cursor: pointer;
+}
+.stats-preview-banner {
+    display: flex;
+    gap: 20px;
+    background: rgba(0,0,0,0.3);
+    padding: 15px;
+    border-radius: 6px;
+    border-left: 4px solid var(--accent-primary);
+}
+.preview-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.preview-stat-label {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+}
+.preview-stat-val {
+    font-size: 1.2rem;
+    font-weight: bold;
+    color: var(--text-primary);
+}
+</style>
+
+<div class="editor-layout">
+    <!-- Sidebar -->
+    <div class="sidebar-list">
+        <div class="sidebar-header">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <h3 style="margin: 0; font-size: 1.1rem;">ENEMIES (<span id="count-badge">0</span>)</h3>
+                <button id="btn-new-enemy" class="primary" style="padding: 4px 10px; font-size: 0.8rem;">+ NEW</button>
+            </div>
+            <input type="text" id="search-input" placeholder="Search enemy name / ID..." style="width: 100%; box-sizing: border-box;">
+            <div style="display: flex; gap: 5px;">
+                <button class="tier-filter-btn active secondary" data-tier="ALL" style="flex: 1; padding: 4px;">ALL</button>
+                <button class="tier-filter-btn secondary" data-tier="NORMAL" style="flex: 1; padding: 4px;">NORMAL</button>
+                <button class="tier-filter-btn secondary" data-tier="ELITE" style="flex: 1; padding: 4px;">ELITE</button>
+                <button class="tier-filter-btn secondary" data-tier="BOSS" style="flex: 1; padding: 4px;">BOSS</button>
+            </div>
+        </div>
+        <div class="enemy-items" id="enemies-container">
+            <!-- Populated dynamically -->
+        </div>
+    </div>
+
+    <!-- Main Editor Form -->
+    <div class="editor-form-card">
+        <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 15px;">
+            <div style="display: flex; gap: 15px; align-items: center;">
+                <img id="selected-enemy-img" src="/static/images/placeholder.webp" alt="Enemy Avatar" style="width: 60px; height: 60px; border-radius: 6px; background: rgba(0,0,0,0.4); object-fit: contain; border: 1px solid var(--border); display: none;">
+                <div>
+                    <h2 id="selected-enemy-title" style="margin: 0;">Select an Enemy</h2>
+                    <span id="selected-enemy-subtitle" style="color: var(--text-secondary); font-size: 0.85rem;">Choose an enemy from the list or create a new benchmark target.</span>
+                </div>
+            </div>
+            <div style="display: flex; gap: 10px;">
+                <button id="btn-delete" class="secondary" style="color: #ef4444; border-color: rgba(239,68,68,0.4); display: none;">DELETE</button>
+                <button id="btn-save" class="primary">SAVE ENEMY</button>
+            </div>
+        </div>
+
+        <div class="stats-preview-banner" id="preview-banner">
+            <div class="preview-stat">
+                <span class="preview-stat-label">Calculated DPS</span>
+                <span class="preview-stat-val" id="prev-dps">0.0</span>
+            </div>
+            <div class="preview-stat">
+                <span class="preview-stat-label">Phys EHP Pool (100% DEF)</span>
+                <span class="preview-stat-val" id="prev-pehp">0</span>
+            </div>
+            <div class="preview-stat">
+                <span class="preview-stat-label">Arts EHP Pool (RES)</span>
+                <span class="preview-stat-val" id="prev-aehp">0</span>
+            </div>
+            <div class="preview-stat">
+                <span class="preview-stat-label">Push/Pull Threshold</span>
+                <span class="preview-stat-val" id="prev-weight">0 W</span>
+            </div>
+        </div>
+
+        <!-- Form fields -->
+        <div class="form-grid">
+            <div class="form-group">
+                <label for="inp-id">Enemy ID</label>
+                <input type="text" id="inp-id" placeholder="e.g. enemy_custom_target">
+            </div>
+            <div class="form-group">
+                <label for="inp-name">Enemy Name</label>
+                <input type="text" id="inp-name" placeholder="e.g. High-Inquisitor Benchmark">
+            </div>
+            <div class="form-group">
+                <label for="inp-tier">Tier / Classification</label>
+                <select id="inp-tier">
+                    <option value="NORMAL">NORMAL (Standard Mob)</option>
+                    <option value="ELITE">ELITE (Heavy Mob)</option>
+                    <option value="BOSS">BOSS (Major Encounter)</option>
+                </select>
+            </div>
+        </div>
+
+        <h4 style="margin: 10px 0 0 0; color: var(--accent-primary);">CORE COMBAT STATS</h4>
+        <div class="form-grid">
+            <div class="form-group">
+                <label for="inp-hp">Max HP</label>
+                <input type="number" id="inp-hp" value="5000" min="1">
+            </div>
+            <div class="form-group">
+                <label for="inp-atk">Attack Power (ATK)</label>
+                <input type="number" id="inp-atk" value="500" min="0">
+            </div>
+            <div class="form-group">
+                <label for="inp-def">Defense (DEF)</label>
+                <input type="number" id="inp-def" value="250" min="0">
+            </div>
+            <div class="form-group">
+                <label for="inp-res">Arts Resistance (RES)</label>
+                <input type="number" id="inp-res" value="20" min="0" max="100">
+            </div>
+            <div class="form-group">
+                <label for="inp-interval">Attack Interval (seconds)</label>
+                <input type="number" id="inp-interval" value="3.0" step="0.1" min="0.1">
+            </div>
+            <div class="form-group">
+                <label for="inp-weight">Weight Level</label>
+                <input type="number" id="inp-weight" value="2" min="0" max="15">
+            </div>
+            <div class="form-group">
+                <label for="inp-speed">Move Speed</label>
+                <input type="number" id="inp-speed" value="1.0" step="0.1" min="0.1">
+            </div>
+        </div>
+
+        <h4 style="margin: 10px 0 0 0; color: var(--accent-primary);">EVASION & IMMUNITIES</h4>
+        <div class="form-grid">
+            <div class="form-group">
+                <label for="inp-dodge-phys">Physical Dodge Rate (%)</label>
+                <input type="number" id="inp-dodge-phys" value="0" min="0" max="100" step="1">
+            </div>
+            <div class="form-group">
+                <label for="inp-dodge-arts">Arts Dodge Rate (%)</label>
+                <input type="number" id="inp-dodge-arts" value="0" min="0" max="100" step="1">
+            </div>
+        </div>
+
+        <div class="checkbox-grid">
+            <label class="checkbox-label">
+                <input type="checkbox" id="chk-stun"> Immune to Stun
+            </label>
+            <label class="checkbox-label">
+                <input type="checkbox" id="chk-silence"> Immune to Silence
+            </label>
+            <label class="checkbox-label">
+                <input type="checkbox" id="chk-freeze"> Immune to Freeze
+            </label>
+            <label class="checkbox-label">
+                <input type="checkbox" id="chk-sleep"> Immune to Sleep
+            </label>
+            <label class="checkbox-label">
+                <input type="checkbox" id="chk-levitate"> Immune to Levitate
+            </label>
+        </div>
+    </div>
+</div>
+
+<script>
+let allEnemies = [];
+let currentTierFilter = 'ALL';
+let selectedEnemyId = null;
+
+async function loadEnemies() {
+    try {
+        const res = await fetch('/api/enemies');
+        if (res.ok) {
+            allEnemies = await res.json();
+            renderEnemiesList();
+            if (allEnemies.length > 0 && !selectedEnemyId) {
+                selectEnemy(allEnemies[0]);
+            }
+        }
+    } catch (e) {
+        console.error('Failed to load enemies:', e);
+    }
+}
+
+function renderEnemiesList() {
+    const container = document.getElementById('enemies-container');
+    container.innerHTML = '';
+    const search = document.getElementById('search-input').value.toLowerCase().trim();
+
+    const filtered = allEnemies.filter(e => {
+        const matchTier = currentTierFilter === 'ALL' || e.tier.toUpperCase() === currentTierFilter;
+        const matchSearch = !search || e.name.toLowerCase().includes(search) || e.id.toLowerCase().includes(search);
+        return matchTier && matchSearch;
+    });
+
+    document.getElementById('count-badge').innerText = filtered.length;
+
+    filtered.forEach(e => {
+        const item = document.createElement('div');
+        item.className = 'enemy-item' + (selectedEnemyId === e.id ? ' active' : '');
+        
+        let badgeClass = 'badge-normal';
+        if (e.tier === 'ELITE') badgeClass = 'badge-elite';
+        if (e.tier === 'BOSS') badgeClass = 'badge-boss';
+
+        item.innerHTML = `
+            <div style="display: flex; gap: 8px; align-items: center; overflow: hidden;">
+                <img src="/static/images/enemies/${e.id}.png" 
+                     onerror="if(!this.dataset.triedCdn){this.dataset.triedCdn='1'; this.src='https://cdn.jsdelivr.net/gh/fexli/ArknightsResource@main/enemy/' + encodeURIComponent('${e.id}') + '.png';} else {this.onerror=null; this.src='/static/images/placeholder.webp';}" 
+                     alt="${e.name}" 
+                     style="width: 32px; height: 32px; border-radius: 4px; background: rgba(0,0,0,0.4); object-fit: contain; flex-shrink: 0; border: 1px solid rgba(255,255,255,0.1);">
+                <div style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 170px;">
+                    <div style="font-weight: 600; font-size: 0.88rem;">${e.name}</div>
+                    <div style="font-size: 0.72rem; color: var(--text-secondary); font-family: monospace;">${e.id}</div>
+                </div>
+            </div>
+            <span class="badge ${badgeClass}">${e.tier}</span>
+        `;
+
+        item.onclick = () => selectEnemy(e);
+        container.appendChild(item);
+    });
+}
+
+function selectEnemy(e) {
+    selectedEnemyId = e.id;
+    document.getElementById('selected-enemy-title').innerText = e.name;
+    document.getElementById('selected-enemy-subtitle').innerText = `ID: ${e.id} | Tier: ${e.tier}`;
+    document.getElementById('btn-delete').style.display = 'inline-block';
+
+    const imgEl = document.getElementById('selected-enemy-img');
+    if (imgEl) {
+        imgEl.style.display = 'block';
+        imgEl.dataset.triedCdn = '';
+        imgEl.src = `/static/images/enemies/${e.id}.png`;
+        imgEl.onerror = function() {
+            if (!this.dataset.triedCdn) {
+                this.dataset.triedCdn = '1';
+                this.src = 'https://cdn.jsdelivr.net/gh/fexli/ArknightsResource@main/enemy/' + encodeURIComponent(e.id) + '.png';
+            } else {
+                this.onerror = null;
+                this.src = '/static/images/placeholder.webp';
+            }
+        };
+    }
+
+    document.getElementById('inp-id').value = e.id;
+    document.getElementById('inp-id').disabled = true;
+    document.getElementById('inp-name').value = e.name;
+    document.getElementById('inp-tier').value = e.tier.toUpperCase();
+    document.getElementById('inp-hp').value = e.hp;
+    document.getElementById('inp-atk').value = e.atk;
+    document.getElementById('inp-def').value = e.def;
+    document.getElementById('inp-res').value = e.res;
+    document.getElementById('inp-interval').value = e.attack_interval;
+    document.getElementById('inp-weight').value = e.weight;
+    document.getElementById('inp-speed').value = e.move_speed || 1.0;
+
+    document.getElementById('inp-dodge-phys').value = Math.round((e.dodge_phys || 0) * 100);
+    document.getElementById('inp-dodge-arts').value = Math.round((e.dodge_arts || 0) * 100);
+
+    document.getElementById('chk-stun').checked = !!e.immune_stun;
+    document.getElementById('chk-silence').checked = !!e.immune_silence;
+    document.getElementById('chk-freeze').checked = !!e.immune_freeze;
+    document.getElementById('chk-sleep').checked = !!e.immune_sleep;
+    document.getElementById('chk-levitate').checked = !!e.immune_levitate;
+
+    updatePreview();
+    renderEnemiesList();
+}
+
+function updatePreview() {
+    const hp = parseFloat(document.getElementById('inp-hp').value) || 0;
+    const atk = parseFloat(document.getElementById('inp-atk').value) || 0;
+    const def = parseFloat(document.getElementById('inp-def').value) || 0;
+    const res = parseFloat(document.getElementById('inp-res').value) || 0;
+    const interval = parseFloat(document.getElementById('inp-interval').value) || 1.0;
+    const weight = parseFloat(document.getElementById('inp-weight').value) || 0;
+
+    const dps = interval > 0 ? (atk / interval) : 0;
+    const pehp = hp + def * 10;
+    const aehp = res < 100 ? (hp / (1.0 - res / 100.0)) : hp * 10;
+
+    document.getElementById('prev-dps').innerText = dps.toFixed(1);
+    document.getElementById('prev-pehp').innerText = Math.round(pehp).toLocaleString();
+    document.getElementById('prev-aehp').innerText = Math.round(aehp).toLocaleString();
+    document.getElementById('prev-weight').innerText = weight + ' W';
+}
+
+['inp-hp', 'inp-atk', 'inp-def', 'inp-res', 'inp-interval', 'inp-weight'].forEach(id => {
+    document.getElementById(id).addEventListener('input', updatePreview);
+});
+
+document.getElementById('btn-new-enemy').onclick = () => {
+    selectedEnemyId = null;
+    document.getElementById('selected-enemy-title').innerText = 'New Custom Target';
+    document.getElementById('selected-enemy-subtitle').innerText = 'Create a custom enemy for simulation testing';
+    document.getElementById('btn-delete').style.display = 'none';
+    const imgEl = document.getElementById('selected-enemy-img');
+    if (imgEl) imgEl.style.display = 'none';
+
+    document.getElementById('inp-id').value = 'enemy_custom_' + Date.now();
+    document.getElementById('inp-id').disabled = false;
+    document.getElementById('inp-name').value = 'New Custom Enemy';
+    document.getElementById('inp-tier').value = 'ELITE';
+    document.getElementById('inp-hp').value = 15000;
+    document.getElementById('inp-atk').value = 700;
+    document.getElementById('inp-def').value = 500;
+    document.getElementById('inp-res').value = 30;
+    document.getElementById('inp-interval').value = 3.0;
+    document.getElementById('inp-weight').value = 3;
+    document.getElementById('inp-speed').value = 1.0;
+    document.getElementById('inp-dodge-phys').value = 0;
+    document.getElementById('inp-dodge-arts').value = 0;
+    document.getElementById('chk-stun').checked = false;
+    document.getElementById('chk-silence').checked = false;
+    document.getElementById('chk-freeze').checked = false;
+    document.getElementById('chk-sleep').checked = false;
+    document.getElementById('chk-levitate').checked = false;
+
+    updatePreview();
+    renderEnemiesList();
+};
+
+document.getElementById('btn-save').onclick = async () => {
+    const enemyData = {
+        id: document.getElementById('inp-id').value.trim(),
+        name: document.getElementById('inp-name').value.trim() || 'Custom Enemy',
+        tier: document.getElementById('inp-tier').value,
+        hp: parseFloat(document.getElementById('inp-hp').value) || 5000,
+        atk: parseFloat(document.getElementById('inp-atk').value) || 500,
+        def: parseFloat(document.getElementById('inp-def').value) || 200,
+        res: parseFloat(document.getElementById('inp-res').value) || 10,
+        weight: parseFloat(document.getElementById('inp-weight').value) || 1,
+        move_speed: parseFloat(document.getElementById('inp-speed').value) || 1.0,
+        attack_interval: parseFloat(document.getElementById('inp-interval').value) || 3.0,
+        dodge_phys: (parseFloat(document.getElementById('inp-dodge-phys').value) || 0) / 100.0,
+        dodge_arts: (parseFloat(document.getElementById('inp-dodge-arts').value) || 0) / 100.0,
+        immune_stun: document.getElementById('chk-stun').checked,
+        immune_silence: document.getElementById('chk-silence').checked,
+        immune_freeze: document.getElementById('chk-freeze').checked,
+        immune_sleep: document.getElementById('chk-sleep').checked,
+        immune_levitate: document.getElementById('chk-levitate').checked
+    };
+
+    if (!enemyData.id) {
+        alert('Enemy ID is required!');
+        return;
+    }
+
+    try {
+        const res = await fetch('/api/enemies/save', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(enemyData)
+        });
+        if (res.ok) {
+            alert('Enemy saved successfully!');
+            await loadEnemies();
+            selectedEnemyId = enemyData.id;
+            const saved = allEnemies.find(e => e.id === selectedEnemyId);
+            if (saved) selectEnemy(saved);
+        } else {
+            const err = await res.json();
+            alert('Error saving enemy: ' + (err.detail || 'Unknown error'));
+        }
+    } catch (e) {
+        alert('Failed to save enemy: ' + e);
+    }
+};
+
+document.getElementById('btn-delete').onclick = async () => {
+    if (!selectedEnemyId) return;
+    if (!confirm(`Are you sure you want to delete enemy '${selectedEnemyId}'?`)) return;
+
+    try {
+        const res = await fetch(`/api/enemies/${encodeURIComponent(selectedEnemyId)}`, {
+            method: 'DELETE'
+        });
+        if (res.ok) {
+            alert('Enemy deleted successfully!');
+            selectedEnemyId = null;
+            await loadEnemies();
+        } else {
+            alert('Failed to delete enemy.');
+        }
+    } catch (e) {
+        alert('Error: ' + e);
+    }
+};
+
+document.getElementById('search-input').addEventListener('input', renderEnemiesList);
+
+document.querySelectorAll('.tier-filter-btn').forEach(btn => {
+    btn.onclick = () => {
+        document.querySelectorAll('.tier-filter-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentTierFilter = btn.dataset.tier;
+        renderEnemiesList();
+    };
+});
+
+window.addEventListener('DOMContentLoaded', loadEnemies);
+</script>
+{% endblock %}

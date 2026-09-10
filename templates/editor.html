@@ -1,0 +1,996 @@
+{% extends "base.html" %}
+
+{% block title %}Editor - Arknights Analytics{% endblock %}
+
+{% block content %}
+<div class="dashboard-grid">
+    <!-- Sidebar: Operator List -->
+    <div class="sidebar">
+        <div class="card">
+            <h3>OPERATOR LIST ({{ operators|length }})</h3>
+            <input type="text" id="op-search" placeholder="Search..." style="width: 100%; margin: 10px 0;">
+            <div style="max-height: 600px; overflow-y: auto;">
+                <table id="op-list-table">
+                    {% for op in operators %}
+                    <tr class="op-list-item" onclick="selectOperator({{ op.operator_id | tojson }})">
+                        <td style="padding: 10px; border-bottom: 1px solid var(--border-color); cursor: pointer; display: flex; justify-content: space-between; align-items: center;">
+                            <div>
+                                <img src="/static/images/{{ op.photo_path }}?v={{ version }}" onerror="this.src='/static/images/placeholder.webp'" style="width:24px; height:24px; vertical-align:middle; margin-right:5px; background:#000; border-radius:4px;">
+                                <span>{{ op.name }}</span>
+                            </div>
+                            <button class="delete-btn list-delete-btn" onclick="event.stopPropagation(); deleteOperator({{ op.operator_id }}, '{{ op.name }}')">🗑️</button>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </table>
+            </div>
+            <button onclick="location.href='/editor'" style="width: 100%; margin-top: 15px;" class="primary">NEW OPERATOR</button>
+        </div>
+    </div>
+
+    <!-- Main Editor Form -->
+    <div class="main-content">
+        <div class="card">
+            <h3>{% if selected_op %}EDIT: {{ selected_op.name }}{% else %}NEW OPERATOR{% endif %}</h3>
+
+            <form id="editor-form" style="margin-top: 20px;">
+                <input type="hidden" id="op-id">
+
+                <!-- Tabs for Complex Data -->
+                <div class="tabs" style="margin-top: 20px;">
+                    <div class="tab active" onclick="showTab(this, 'general-tab')">General</div>
+                    <div class="tab" onclick="showTab(this, 'stats-tab')">Base Stats</div>
+                    <div class="tab" onclick="showTab(this, 'talents-tab')">Talents</div>
+                    <div class="tab" onclick="showTab(this, 'skills-tab')">Skills</div>
+                    <div class="tab" onclick="showTab(this, 'modules-tab')">Modules</div>
+                    <div class="tab" onclick="showTab(this, 'potentials-tab')">Potentials</div>
+                    <div class="tab" onclick="showTab(this, 'summons-tab')">Summons</div>
+                </div>
+
+                <!-- General Tab -->
+                <div id="general-tab" class="tab-content active">
+                    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px;">
+                        <div class="form-group"><label>Name</label><input type="text" id="op-name" required></div>
+                        <div class="form-group"><label>Rarity</label><input type="number" id="op-rarity" min="1" max="6"></div>
+                        <div class="form-group">
+                            <label>Photo (Upload)</label>
+                            <input type="file" id="op-photo-upload" accept="image/*">
+                        </div>
+                        <div class="form-group">
+                            <label>Class</label>
+                            <select id="op-class" onchange="updateBranches()"></select>
+                        </div>
+                        <div class="form-group">
+                            <label>Branch</label>
+                            <select id="op-branch"></select>
+                        </div>
+                        <div class="form-group">
+                            <label>Position</label>
+                            <select id="op-position">
+                                <option value="ranged">Ranged</option>
+                                <option value="ground">Ground</option>
+                            </select>
+                        </div>
+                        <div class="form-group checkbox-group" style="align-items: center; display: flex; gap: 10px; padding-top: 20px;">
+                            <input type="checkbox" id="op-is-summon">
+                            <label style="margin:0; font-weight: bold; color: var(--accent);">Is Summon / Mini-Operator</label>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Stats Tab -->
+                <div id="stats-tab" class="tab-content">
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                        <div>
+                            <h5>Base Max Level Stats</h5>
+                            <div class="form-group"><label>HP</label><input type="number" id="base-hp"></div>
+                            <div class="form-group"><label>ATK</label><input type="number" id="base-atk"></div>
+                            <div class="form-group"><label>DEF</label><input type="number" id="base-def"></div>
+                            <div class="form-group"><label>RES</label><input type="number" id="base-res"></div>
+                            <div class="form-group"><label>Attack Interval (s)</label><input type="number" step="0.01" id="base-interval"></div>
+                            <div class="form-group"><label>DP Cost</label><input type="number" id="base-dp"></div>
+                            <div class="form-group"><label>Redeploy (s)</label><input type="number" id="base-redeploy"></div>
+                        </div>
+                        <div>
+                            <h5>Trust Stats (Bonus)</h5>
+                            <div class="form-group"><label>Bonus HP</label><input type="number" id="trust-hp"></div>
+                            <div class="form-group"><label>Bonus ATK</label><input type="number" id="trust-atk"></div>
+                            <div class="form-group"><label>Bonus DEF</label><input type="number" id="trust-def"></div>
+                            <div class="form-group"><label>Bonus RES</label><input type="number" id="trust-res"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Talents Tab -->
+                <div id="talents-tab" class="tab-content">
+                    <div id="talents-list"></div>
+                    <button type="button" onclick="addItem('talents')" class="text-accent" style="margin-top:10px;">+ ADD TALENT</button>
+                </div>
+
+                <!-- Skills Tab -->
+                <div id="skills-tab" class="tab-content">
+                    <div id="skills-list"></div>
+                    <button type="button" onclick="addItem('skills')" class="text-accent" style="margin-top:10px;">+ ADD SKILL</button>
+                </div>
+
+                <!-- Modules Tab -->
+                <div id="modules-tab" class="tab-content">
+                    <div id="modules-list"></div>
+                    <button type="button" onclick="addItem('modules')" class="text-accent" style="margin-top:10px;">+ ADD MODULE</button>
+                </div>
+
+                <!-- Potentials Tab -->
+                <div id="potentials-tab" class="tab-content">
+                    <p class="text-secondary" style="margin-bottom: 10px;">Define buffs provided by potential levels (Pot 2-6).</p>
+                    <div id="potentials-list"></div>
+                    <button type="button" onclick="addItem('potentials')" class="text-accent" style="margin-top:10px;">+ ADD POTENTIAL BUFF</button>
+                </div>
+
+                <!-- Summons Tab -->
+                <div id="summons-tab" class="tab-content">
+                    <p class="text-secondary" style="margin-bottom: 10px;">Define summons attached to this operator.</p>
+                    <div id="summons-list"></div>
+                    <button type="button" onclick="addItem('summons')" class="text-accent" style="margin-top:10px;">+ ADD SUMMON</button>
+                </div>
+
+                <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid var(--border-color);">
+                    <button type="button" id="save-op" class="primary" style="width: 200px;">SAVE OPERATOR</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    const CLASSES = {{ classes|default([]) | tojson | safe }};
+    const ALL_OPS = {{ operators|default([]) | tojson | safe }};
+    let SELECTED_OP = {{ selected_op|default({}) | tojson | safe }} || {
+        name: "", rarity: 6, class_id: 1, branch_id: 1, position: "ground",
+        base_stats: { hp: 0, atk: 0, def: 0, res: 0, base_interval: 1.0, dp_cost: 0, redeployment_time: 70 },
+        trust_stats: { hp: 0, atk: 0, def: 0, res: 0 },
+        talents: [], skills: [], modules: [], potentials: [], summons: []
+    };
+
+    const BUFF_STATS = [
+        'arts_dmg_per_second', 'arts_dmg_per_second_atk_ratio', 'arts_dmg_red', 
+        'arts_fragile', 'aspd', 'atk', 'barrier', 'base_interval_fixed', 'base_interval_flat', 'block_count', 'camouflage', 
+        'damage_recovery', 'def', 'def_ignore_flat', 'def_ignore_ratio', 'dodge_arts', 'dodge_phys', 'dp_cost', 'dp_recovery', 'elemental_barrier', 
+        'elemental_buildup', 'elemental_fragile', 'elemental_healing', 'elemental_healing_atk_ratio', 
+        'elemental_healing_per_second', 'elemental_injury_reduction', 'emergency_hp_restore_amount', 
+        'emergency_hp_restore_threshold', 'emergency_hp_restore_uses', 'emergency_hp_restore_cooldown', 'extra_damage', 'fear_duration', 'floating', 'fragile', 'frighten_duration', 'heal_from_damage', 'healing_bonus', 
+        'healing_mult', 'healing_per_second_atk_ratio', 'healing_received_bonus', 'hits_mult', 'hp', 'hp_loss_per_second', 'hp_regen', 
+        'immediate_dmg_mult', 'immediate_dmg_end_mult', 'immediate_dp', 'immediate_heal',
+        'immediate_hp_loss_start', 'immediate_hp_loss_end', 'immortality_duration', 
+        'initial_summons', 'interval_mult', 'mech_accord_dmg_kind', 'mech_accord_drones', 'mech_accord_initial_mult', 'mech_accord_max_mult', 'override_attack', 'phys_dmg_per_second', 'phys_dmg_per_second_atk_ratio', 
+        'phys_dmg_red', 'post_skill_stun', 'push_pull', 'redeployment_time', 'reflect_damage', 'res', 'res_ignore_flat', 'res_ignore_ratio', 'sanctuary', 'self_stun', 
+        'silence_duration', 'skill_activations_bonus', 'skill_duration_flat', 'slow_duration', 'sp_per_hit', 'sp_per_second', 'sp_recovery', 
+        'status_resistance', 'stun_duration', 'summon_limit', 'talent_addition', 'talent_multiplier', 'target_def', 
+        'target_limit', 'target_res', 'weakness_damage'
+    ];
+    const BUFF_TYPES = ['flat', 'ratio', 'multiplier', 'flat_base', 'flat_insp'];
+
+    function escapeHTML(str) {
+        if (!str) return "";
+        return String(str)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#039;");
+    }
+
+    // Initialize UI
+    window.onload = () => {
+        const classSel = document.getElementById('op-class');
+        if (classSel) {
+            CLASSES.forEach(c => {
+                const opt = document.createElement('option');
+                opt.value = c.class_id;
+                opt.innerText = c.name;
+                classSel.appendChild(opt);
+            });
+        }
+
+        if (SELECTED_OP.operator_id) {
+            document.getElementById('op-id').value = SELECTED_OP.operator_id;
+            document.getElementById('op-name').value = SELECTED_OP.name;
+            document.getElementById('op-rarity').value = SELECTED_OP.rarity;
+            document.getElementById('op-class').value = SELECTED_OP.class_id;
+            updateBranches();
+            document.getElementById('op-branch').value = SELECTED_OP.branch_id;
+            document.getElementById('op-position').value = SELECTED_OP.position;
+            document.getElementById('op-is-summon').checked = SELECTED_OP.is_summon || false;
+
+            document.getElementById('base-hp').value = Array.isArray(SELECTED_OP.base_stats.hp) ? SELECTED_OP.base_stats.hp[3] : SELECTED_OP.base_stats.hp;
+            document.getElementById('base-atk').value = Array.isArray(SELECTED_OP.base_stats.atk) ? SELECTED_OP.base_stats.atk[3] : SELECTED_OP.base_stats.atk;
+            document.getElementById('base-def').value = Array.isArray(SELECTED_OP.base_stats.def) ? SELECTED_OP.base_stats.def[3] : SELECTED_OP.base_stats.def;
+            document.getElementById('base-res').value = SELECTED_OP.base_stats.res;
+            document.getElementById('base-interval').value = SELECTED_OP.base_stats.base_interval;
+            document.getElementById('base-dp').value = SELECTED_OP.base_stats.dp_cost;
+            document.getElementById('base-redeploy').value = SELECTED_OP.base_stats.redeployment_time;
+
+            if (SELECTED_OP.trust_stats) {
+                document.getElementById('trust-hp').value = SELECTED_OP.trust_stats.hp || 0;
+                document.getElementById('trust-atk').value = SELECTED_OP.trust_stats.atk || 0;
+                document.getElementById('trust-def').value = SELECTED_OP.trust_stats.def || 0;
+                document.getElementById('trust-res').value = SELECTED_OP.trust_stats.res || 0;
+            }
+        } else {
+            updateBranches();
+        }
+        SELECTED_OP.summons = SELECTED_OP.summons || [];
+        renderLists();
+    };
+
+    function updateBranches() {
+        const classId = parseInt(document.getElementById('op-class').value);
+        const branchSel = document.getElementById('op-branch');
+        if (!branchSel) return;
+        branchSel.innerHTML = "";
+        const cls = CLASSES.find(c => c.class_id === classId);
+        if (cls && cls.branches) {
+            cls.branches.forEach(b => {
+                const opt = document.createElement('option');
+                opt.value = b.branch_id;
+                opt.innerText = b.name;
+                branchSel.appendChild(opt);
+            });
+        }
+    }
+
+    function showTab(el, tabId) {
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.getElementById(tabId).classList.add('active');
+        if (el) {
+            el.classList.add('active');
+        }
+    }
+
+    function renderLists() {
+        renderSubList('talents', SELECTED_OP.talents);
+        renderSubList('skills', SELECTED_OP.skills);
+        renderSubList('modules', SELECTED_OP.modules);
+        renderSubList('potentials', SELECTED_OP.potentials || []);
+        renderSubList('summons', SELECTED_OP.summons || []);
+    }
+
+    async function deleteOperator(opId, opName) {
+        if (!confirm(`Are you sure you want to delete ${opName}? This action cannot be undone.`)) return;
+        try {
+            const res = await fetch(`/api/operators/${opId}`, { method: 'DELETE' });
+            if (res.ok) {
+                if (SELECTED_OP && SELECTED_OP.operator_id === opId) {
+                    location.href = '/editor'; // Redirect to new operator if deleting currently edited one
+                } else {
+                    location.reload();
+                }
+            } else {
+                const err = await res.json();
+                alert(`Error: ${err.detail}`);
+            }
+        } catch (e) {
+            console.error(e);
+            alert("Failed to delete operator.");
+        }
+    }
+
+    function renderSubList(type, items) {
+        const container = document.getElementById(`${type}-list`);
+        if (!container) return;
+        container.innerHTML = items.map((item, idx) => `
+            <div class="card" style="margin-bottom: 15px; border-left: 4px solid var(--accent);">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <h5 style="margin:0;">${type.toUpperCase().slice(0, -1)} #${idx + 1}</h5>
+                    <button type="button" class="text-accent" onclick="removeItem('${type}', ${idx})">REMOVE</button>
+                </div>
+                <div style="margin-top:10px; display:grid; gap:10px;">
+                    ${renderItemFields(type, item, idx)}
+                    ${type !== 'summons' ? `
+                    <div>
+                        <strong>Buffs:</strong>
+                        <div id="${type}-${idx}-buffs" style="margin-left: 20px;">
+                            ${(item.buffs || []).map((b, bIdx) => renderBuff(type, idx, b, bIdx, false)).join('')}
+                        </div>
+                        <button type="button" onclick="addBuff('${type}', ${idx}, false)" class="text-accent" style="font-size:0.8rem;">+ ADD BUFF</button>
+                    </div>
+                    ` : ''}
+                </div>
+            </div>
+        `).join('');
+    }
+
+    function renderBuff(parentType, parentIndex, b, bIdx, isPassive = false) {
+        const currentType = b.buff_type || b.type || 'ratio';
+        const isRatio = currentType === 'ratio';
+        const isFlat = currentType === 'flat' || currentType === 'flat_base' || currentType === 'flat_insp';
+        const isMult = currentType === 'multiplier';
+        
+        let hint = "";
+        if (isRatio) hint = "(e.g. 0.15 = +15%)";
+        else if (isFlat) hint = "(e.g. 100 = +100)";
+        else if (isMult) hint = "(e.g. 1.5 = x1.5)";
+
+        const isOverride = b.stat === 'override_attack';
+        const isExtra = b.stat === 'extra_damage';
+        const isReflect = b.stat === 'reflect_damage';
+        const isRecovery = b.stat === 'damage_recovery';
+        const isElemental = b.stat === 'elemental_buildup';
+        const isPushPull = b.stat === 'push_pull';
+        const complexValue = (isOverride || isExtra || isReflect || isRecovery || isElemental || isPushPull) ? (typeof b.value === 'object' ? b.value : {}) : null;
+
+        return `
+            <div style="display:flex; flex-direction:column; gap:2px; margin-bottom:10px; padding:8px; background:rgba(255,255,255,0.03); border-radius:4px;">
+                <div style="display:flex; gap:5px; align-items:center; flex-wrap: wrap;">
+                    <select onchange="updateBuff('${parentType}', ${parentIndex}, ${bIdx}, 'stat', this.value, ${isPassive})" style="width:120px;">
+                        ${BUFF_STATS.map(s => `<option value="${s}" ${b.stat === s ? 'selected' : ''}>${s}</option>`).join('')}
+                    </select>
+                    
+                    ${!complexValue ? `
+                        <select onchange="updateBuff('${parentType}', ${parentIndex}, ${bIdx}, 'buff_type', this.value, ${isPassive})" style="width:100px;">
+                            ${BUFF_TYPES.map(t => `<option value="${t}" ${currentType === t ? 'selected' : ''}>${t}</option>`).join('')}
+                        </select>
+                        <input type="number" step="0.01" placeholder="Value" value="${b.value}" onchange="updateBuff('${parentType}', ${parentIndex}, ${bIdx}, 'value', parseFloat(this.value), ${isPassive})" style="width:80px;">
+                    ` : ''}
+
+                    ${isOverride ? `
+                        <div style="display:flex; flex-wrap:wrap; gap:5px; align-items:center; background:rgba(0,0,0,0.2); padding:5px; border-radius:4px;">
+                            <label style="font-size:0.7rem;">Dmg Kind:</label>
+                            <select onchange="updateBuffComplex('${parentType}', ${parentIndex}, ${bIdx}, 'dmg_kind', this.value, ${isPassive})" style="width:90px;">
+                                <option value="physical" ${complexValue.dmg_kind === 'physical' ? 'selected' : ''}>Physical</option>
+                                <option value="arts" ${complexValue.dmg_kind === 'arts' ? 'selected' : ''}>Arts</option>
+                                <option value="true" ${complexValue.dmg_kind === 'true' ? 'selected' : ''}>True</option>
+                            </select>
+                            <label style="font-size:0.7rem;">ATK Mod:</label>
+                            <input type="number" step="0.1" value="${complexValue.atk_mod || 1.0}" onchange="updateBuffComplex('${parentType}', ${parentIndex}, ${bIdx}, 'atk_mod', parseFloat(this.value), ${isPassive})" style="width:50px;">
+                            <label style="font-size:0.7rem;">ASPD Mod:</label>
+                            <input type="number" value="${complexValue.aspd_mod || 0}" onchange="updateBuffComplex('${parentType}', ${parentIndex}, ${bIdx}, 'aspd_mod', parseInt(this.value), ${isPassive})" style="width:50px;">
+                            <label style="font-size:0.7rem;">Dmg Ratio:</label>
+                            <input type="number" step="0.01" value="${complexValue.dmg_ratio || 0.0}" onchange="updateBuffComplex('${parentType}', ${parentIndex}, ${bIdx}, 'dmg_ratio', parseFloat(this.value), ${isPassive})" style="width:55px;">
+                            <label style="font-size:0.7rem;">Dmg Flat:</label>
+                            <input type="number" step="1" value="${complexValue.dmg_flat || 0}" onchange="updateBuffComplex('${parentType}', ${parentIndex}, ${bIdx}, 'dmg_flat', parseFloat(this.value), ${isPassive})" style="width:55px;">
+                            <label style="font-size:0.7rem;">Combo Atks:</label>
+                            <input type="number" step="1" value="${complexValue.combo_attacks || ''}" onchange="updateBuffComplex('${parentType}', ${parentIndex}, ${bIdx}, 'combo_attacks', parseInt(this.value), ${isPassive})" style="width:55px;" placeholder="Opt">
+                        </div>
+                    ` : ''}
+
+                    ${isExtra ? `
+                        <div style="display:flex; gap:5px; align-items:center; background:rgba(0,0,0,0.2); padding:5px; border-radius:4px;">
+                            <label style="font-size:0.7rem;">Dmg Kind:</label>
+                            <select onchange="updateBuffComplex('${parentType}', ${parentIndex}, ${bIdx}, 'dmg_kind', this.value, ${isPassive})" style="width:90px;">
+                                <option value="physical" ${complexValue.dmg_kind === 'physical' ? 'selected' : ''}>Physical</option>
+                                <option value="arts" ${complexValue.dmg_kind === 'arts' ? 'selected' : ''}>Arts</option>
+                                <option value="true" ${complexValue.dmg_kind === 'true' ? 'selected' : ''}>True</option>
+                            </select>
+                            <label style="font-size:0.7rem;">Ratio:</label>
+                            <input type="number" step="0.01" value="${complexValue.ratio || 0.1}" onchange="updateBuffComplex('${parentType}', ${parentIndex}, ${bIdx}, 'ratio', parseFloat(this.value), ${isPassive})" style="width:60px;">
+                        </div>
+                    ` : ''}
+
+                    ${isReflect ? `
+                        <div style="display:flex; flex-wrap:wrap; gap:5px; align-items:center; background:rgba(0,0,0,0.2); padding:5px; border-radius:4px;">
+                            <label style="font-size:0.7rem;">Dmg Kind:</label>
+                            <select onchange="updateBuffComplex('${parentType}', ${parentIndex}, ${bIdx}, 'dmg_kind', this.value, ${isPassive})" style="width:90px;">
+                                <option value="physical" ${complexValue.dmg_kind === 'physical' ? 'selected' : ''}>Physical</option>
+                                <option value="arts" ${complexValue.dmg_kind === 'arts' ? 'selected' : ''}>Arts</option>
+                                <option value="true" ${complexValue.dmg_kind === 'true' ? 'selected' : ''}>True</option>
+                            </select>
+                            <label style="font-size:0.7rem;">Scale Stat:</label>
+                            <select onchange="updateBuffComplex('${parentType}', ${parentIndex}, ${bIdx}, 'scale_stat', this.value, ${isPassive})" style="width:85px;">
+                                <option value="flat" ${complexValue.scale_stat === 'flat' ? 'selected' : ''}>Flat Only</option>
+                                <option value="atk" ${complexValue.scale_stat === 'atk' ? 'selected' : ''}>ATK</option>
+                                <option value="def" ${complexValue.scale_stat === 'def' ? 'selected' : ''}>DEF</option>
+                                <option value="hp" ${complexValue.scale_stat === 'hp' ? 'selected' : ''}>HP</option>
+                                <option value="enemy_atk" ${complexValue.scale_stat === 'enemy_atk' ? 'selected' : ''}>Enemy ATK</option>
+                            </select>
+                            <label style="font-size:0.7rem;">Ratio:</label>
+                            <input type="number" step="0.01" value="${complexValue.ratio || 0.0}" onchange="updateBuffComplex('${parentType}', ${parentIndex}, ${bIdx}, 'ratio', parseFloat(this.value), ${isPassive})" style="width:55px;">
+                            <label style="font-size:0.7rem;">Flat:</label>
+                            <input type="number" step="1" value="${complexValue.flat || 0}" onchange="updateBuffComplex('${parentType}', ${parentIndex}, ${bIdx}, 'flat', parseFloat(this.value), ${isPassive})" style="width:55px;">
+                        </div>
+                    ` : ''}
+
+                    ${isRecovery ? `
+                        <div style="display:flex; flex-wrap:wrap; gap:5px; align-items:center; background:rgba(0,0,0,0.2); padding:5px; border-radius:4px;">
+                            <label style="font-size:0.7rem;">Scale Stat:</label>
+                            <select onchange="updateBuffComplex('${parentType}', ${parentIndex}, ${bIdx}, 'scale_stat', this.value, ${isPassive})" style="width:85px;">
+                                <option value="flat" ${complexValue.scale_stat === 'flat' ? 'selected' : ''}>Flat Only</option>
+                                <option value="atk" ${complexValue.scale_stat === 'atk' ? 'selected' : ''}>ATK</option>
+                                <option value="def" ${complexValue.scale_stat === 'def' ? 'selected' : ''}>DEF</option>
+                                <option value="hp" ${complexValue.scale_stat === 'hp' ? 'selected' : ''}>HP</option>
+                                <option value="enemy_atk" ${complexValue.scale_stat === 'enemy_atk' ? 'selected' : ''}>Enemy ATK</option>
+                            </select>
+                            <label style="font-size:0.7rem;">Ratio:</label>
+                            <input type="number" step="0.01" value="${complexValue.ratio || 0.0}" onchange="updateBuffComplex('${parentType}', ${parentIndex}, ${bIdx}, 'ratio', parseFloat(this.value), ${isPassive})" style="width:55px;">
+                            <label style="font-size:0.7rem;">Flat:</label>
+                            <input type="number" step="1" value="${complexValue.flat || 0}" onchange="updateBuffComplex('${parentType}', ${parentIndex}, ${bIdx}, 'flat', parseFloat(this.value), ${isPassive})" style="width:55px;">
+                        </div>
+                    ` : ''}
+
+                    ${isElemental ? `
+                        <div style="display:flex; flex-wrap:wrap; gap:5px; align-items:center; background:rgba(0,0,0,0.2); padding:5px; border-radius:4px;">
+                            <label style="font-size:0.7rem;">Element:</label>
+                            <select onchange="updateBuffComplex('${parentType}', ${parentIndex}, ${bIdx}, 'element', this.value, ${isPassive})" style="width:90px;">
+                                <option value="nervous" ${complexValue.element === 'nervous' ? 'selected' : ''}>Nervous</option>
+                                <option value="corrosion" ${complexValue.element === 'corrosion' ? 'selected' : ''}>Corrosion</option>
+                                <option value="burn" ${complexValue.element === 'burn' ? 'selected' : ''}>Burn</option>
+                                <option value="necrosis" ${complexValue.element === 'necrosis' ? 'selected' : ''}>Necrosis</option>
+                            </select>
+                            <label style="font-size:0.7rem;">ATK Ratio:</label>
+                            <input type="number" step="0.01" value="${complexValue.atk_ratio || 0.0}" onchange="updateBuffComplex('${parentType}', ${parentIndex}, ${bIdx}, 'atk_ratio', parseFloat(this.value), ${isPassive})" style="width:55px;">
+                            <label style="font-size:0.7rem;">Flat:</label>
+                            <input type="number" step="1" value="${complexValue.flat || 0}" onchange="updateBuffComplex('${parentType}', ${parentIndex}, ${bIdx}, 'flat', parseFloat(this.value), ${isPassive})" style="width:55px;">
+                            <label style="font-size:0.7rem;">Dmg Ratio:</label>
+                            <input type="number" step="0.01" value="${complexValue.dmg_ratio || 0.0}" onchange="updateBuffComplex('${parentType}', ${parentIndex}, ${bIdx}, 'dmg_ratio', parseFloat(this.value), ${isPassive})" style="width:55px;">
+                        </div>
+                    ` : ''}
+
+                    ${isPushPull ? `
+                        <div style="display:flex; flex-wrap:wrap; gap:5px; align-items:center; background:rgba(0,0,0,0.2); padding:5px; border-radius:4px;">
+                            <label style="font-size:0.7rem;">Force:</label>
+                            <select onchange="updateBuffComplex('${parentType}', ${parentIndex}, ${bIdx}, 'force', parseFloat(this.value), ${isPassive})" style="width:110px;">
+                                <option value="-1" ${complexValue.force === -1 ? 'selected' : ''}>Very slightly</option>
+                                <option value="0" ${complexValue.force === 0 ? 'selected' : ''}>Slightly</option>
+                                <option value="1" ${complexValue.force === 1 ? 'selected' : ''}>Moderately</option>
+                                <option value="2" ${complexValue.force === 2 ? 'selected' : ''}>Greatly</option>
+                                <option value="3" ${complexValue.force === 3 ? 'selected' : ''}>Significantly</option>
+                                <option value="5" ${complexValue.force === 5 ? 'selected' : ''}>Tremendously</option>
+                            </select>
+                            <label style="font-size:0.7rem;">Targets:</label>
+                            <input type="number" step="1" value="${complexValue.targets || 0}" onchange="updateBuffComplex('${parentType}', ${parentIndex}, ${bIdx}, 'targets', parseFloat(this.value), ${isPassive})" style="width:55px;">
+                        </div>
+                    ` : ''}
+
+                    ${b.stat === 'immediate_dmg_mult' || b.stat === 'immediate_dmg_end_mult' ? `
+                        <select onchange="updateBuff('${parentType}', ${parentIndex}, ${bIdx}, 'immediate_dmg_kind', this.value, ${isPassive})" style="width:100px;">
+                            <option value="physical" ${b.immediate_dmg_kind === 'physical' ? 'selected' : ''}>Physical</option>
+                            <option value="arts" ${b.immediate_dmg_kind === 'arts' ? 'selected' : ''}>Arts</option>
+                            <option value="true" ${b.immediate_dmg_kind === 'true' ? 'selected' : ''}>True</option>
+                            <option value="weakness" ${b.immediate_dmg_kind === 'weakness' ? 'selected' : ''}>Weakness</option>
+                        </select>
+                    ` : ''}
+
+                    <div class="checkbox-group" style="margin-left:5px;">
+                        <input type="checkbox" ${b.is_true_aoe ? 'checked' : ''} onchange="updateBuff('${parentType}', ${parentIndex}, ${bIdx}, 'is_true_aoe', this.checked, ${isPassive})">
+                        <label style="font-size:0.6rem;">True AoE</label>
+                    </div>
+
+                    <div class="checkbox-group" style="margin-left:5px; border-left: 1px solid #444; padding-left: 5px;">
+                        <input type="checkbox" ${b.applies_to_self !== false ? 'checked' : ''} onchange="updateBuff('${parentType}', ${parentIndex}, ${bIdx}, 'applies_to_self', this.checked, ${isPassive})">
+                        <label style="font-size:0.6rem; color: #7bed9f;">Self</label>
+                    </div>
+
+                    <div class="checkbox-group" style="margin-left:5px;">
+                        <input type="checkbox" ${b.applies_to_summon ? 'checked' : ''} onchange="updateBuff('${parentType}', ${parentIndex}, ${bIdx}, 'applies_to_summon', this.checked, ${isPassive})">
+                        <label style="font-size:0.6rem; color: #ff6b81;">Summon</label>
+                    </div>
+
+                    <!-- NEW DECAY FIELDS -->
+                    <div class="checkbox-group" style="margin-left:5px; border-left: 1px solid #444; padding-left: 5px;">
+                        <input type="checkbox" ${b.decay ? 'checked' : ''} onchange="updateBuff('${parentType}', ${parentIndex}, ${bIdx}, 'decay', this.checked, ${isPassive})">
+                        <label style="font-size:0.6rem; color: #ff9f43;">Decay</label>
+                    </div>
+                    ${b.decay ? `
+                        <div style="display:flex; flex-direction:column; gap:2px;">
+                            <label style="font-size:0.6rem; color:#ff9f43;">Target Value</label>
+                            <input type="number" step="0.01" value="${b.decay_target_value || 0}" onchange="updateBuff('${parentType}', ${parentIndex}, ${bIdx}, 'decay_target_value', parseFloat(this.value), ${isPassive})" style="width:60px; border-color: #ff9f43;" title="The final value the buff reaches">
+                        </div>
+                        <div style="display:flex; flex-direction:column; gap:2px;">
+                            <label style="font-size:0.6rem; color:#ff9f43;">Time (s)</label>
+                            <input type="number" step="0.1" value="${b.decay_time || 0}" onchange="updateBuff('${parentType}', ${parentIndex}, ${bIdx}, 'decay_time', parseFloat(this.value), ${isPassive})" style="width:60px; border-color: #ff9f43;" title="Seconds it takes to reach Target Value">
+                        </div>
+                    ` : ''}
+
+                    <select onchange="updateBuff('${parentType}', ${parentIndex}, ${bIdx}, 'target_talent', this.value || null, ${isPassive})" style="width:120px;">
+                        <option value="">-- Target Talent --</option>
+                        ${SELECTED_OP.talents.map(t => `<option value="${escapeHTML(t.name)}" ${b.target_talent === t.name ? 'selected' : ''}>${escapeHTML(t.name)}</option>`).join('')}
+                    </select>
+                    <button type="button" class="text-accent" onclick="removeBuff('${parentType}', ${parentIndex}, ${bIdx}, ${isPassive})">✖</button>
+                </div>
+                <div class="text-secondary" style="font-size:0.7rem; margin-left:125px;">${hint}</div>
+            </div>
+        `;
+    }
+
+    function resolveList(type) {
+        if (type.startsWith('summon-')) {
+            const parts = type.split('-');
+            const sIdx = parseInt(parts[1]);
+            const subType = parts[2];
+            return SELECTED_OP.summons[sIdx][subType];
+        }
+        return SELECTED_OP[type];
+    }
+
+    function updateBuffComplex(type, idx, bIdx, field, val, isPassive = false) {
+        let listField = 'buffs';
+        if (isPassive === true) listField = 'passive_buffs';
+        else if (isPassive === 'overdrive') listField = 'overdrive_buffs';
+        
+        const ctxList = resolveList(type);
+        if (typeof ctxList[idx][listField][bIdx].value !== 'object' || ctxList[idx][listField][bIdx].value === null) {
+            ctxList[idx][listField][bIdx].value = {};
+        }
+        ctxList[idx][listField][bIdx].value[field] = val;
+    }
+
+    function renderItemFields(type, item, idx) {
+        const summonsSliders = `
+            <div class="form-group" style="margin-top: 10px; padding: 10px; background: rgba(0,0,0,0.2); border-radius: 4px;">
+                <label>Active Summons during this ${type.includes('skills') ? 'Skill' : 'Talent'}</label>
+                ${SELECTED_OP.summons && SELECTED_OP.summons.length > 0 ? SELECTED_OP.summons.map((s, sIdx) => {
+                    const count = (item.summons_active || []).filter(name => name === s.name).length;
+                    return `
+                        <div style="display:flex; align-items:center; gap:15px; margin-top:10px;">
+                            <span style="min-width: 120px; font-weight:bold; color:#ff6b81;">${escapeHTML(s.name)}</span>
+                            <input type="range" min="0" max="5" value="${count}" 
+                                onchange="updateSummonsActive('${type}', ${idx}, '${escapeHTML(s.name)}', parseInt(this.value))"
+                                oninput="this.nextElementSibling.innerText = this.value"
+                                style="flex:1;">
+                            <span style="width: 20px; text-align:right; font-weight:bold;">${count}</span>
+                        </div>
+                    `;
+                }).join('') : '<div class="text-secondary" style="font-size:0.8rem;">No summons added to operator yet.</div>'}
+            </div>
+        `;
+
+        if (type.includes('talents')) {
+            return `
+                <div class="form-group">
+                    <label>Talent Name</label>
+                    <input type="text" placeholder="Talent Name" value="${escapeHTML(item.name)}" onchange="updateItem('${type}', ${idx}, 'name', this.value)">
+                </div>
+                <div style="display:flex; gap:10px;">
+                    <div class="form-group" style="flex:1;">
+                        <label>Action Type</label>
+                        <select onchange="updateItem('${type}', ${idx}, 'action_type', this.value)">
+                            <option value="none" ${item.action_type === 'none' ? 'selected' : ''}>No Action Override</option>
+                            <option value="damage" ${item.action_type === 'damage' ? 'selected' : ''}>Damage</option>
+                            <option value="heal" ${item.action_type === 'heal' ? 'selected' : ''}>Heal</option>
+                        </select>
+                    </div>
+                    <div class="form-group" style="flex:1;">
+                        <label>Damage Kind</label>
+                        <select onchange="updateItem('${type}', ${idx}, 'dmg_kind', this.value)">
+                            <option value="physical" ${item.dmg_kind === 'physical' ? 'selected' : ''}>Physical</option>
+                            <option value="arts" ${item.dmg_kind === 'arts' ? 'selected' : ''}>Arts</option>
+                            <option value="true" ${item.dmg_kind === 'true' ? 'selected' : ''}>True</option>
+                            <option value="weakness" ${item.dmg_kind === 'weakness' ? 'selected' : ''}>Weakness</option>
+                        </select>
+                    </div>
+                </div>
+                <div style="display:flex; gap:15px; margin-top:10px; background:rgba(255,255,255,0.05); padding:8px; border-radius:4px;">
+                    <div class="checkbox-group">
+                        <input type="checkbox" ${item.is_global ? 'checked' : ''} onchange="updateItem('${type}', ${idx}, 'is_global', this.checked)">
+                        <label>Global</label>
+                    </div>
+                    <div class="checkbox-group">
+                        <input type="checkbox" ${item.applicable_to_others ? 'checked' : ''} onchange="updateItem('${type}', ${idx}, 'applicable_to_others', this.checked)">
+                        <label>Allies</label>
+                    </div>
+                    <div class="checkbox-group">
+                        <input type="checkbox" ${item.applies_to_self !== false ? 'checked' : ''} onchange="updateItem('${type}', ${idx}, 'applies_to_self', this.checked)">
+                        <label>Self</label>
+                    </div>
+                    <div class="checkbox-group">
+                        <input type="checkbox" ${item.is_true_aoe ? 'checked' : ''} onchange="updateItem('${type}', ${idx}, 'is_true_aoe', this.checked)">
+                        <label>True AoE</label>
+                    </div>
+                    <div class="checkbox-group">
+                        <input type="checkbox" ${item.only_during_skill ? 'checked' : ''} onchange="updateItem('${type}', ${idx}, 'only_during_skill', this.checked)">
+                        <label>Only During Skill</label>
+                    </div>
+                    <div class="checkbox-group">
+                        <input type="checkbox" ${item.perm_camouflage ? 'checked' : ''} onchange="updateItem('${type}', ${idx}, 'perm_camouflage', this.checked)">
+                        <label>Perm Camouflage</label>
+                    </div>
+                </div>
+                ${summonsSliders}
+            `;
+        } else if (type === 'skills') {
+            return `
+                <div class="form-group">
+                    <label>Skill Name</label>
+                    <input type="text" placeholder="Skill Name" value="${escapeHTML(item.name)}" onchange="updateItem('${type}', ${idx}, 'name', this.value)">
+                </div>
+                <div style="display:flex; gap:15px; margin-bottom:10px; background:rgba(255,255,255,0.05); padding:8px; border-radius:4px;">
+                    <div class="checkbox-group">
+                        <input type="checkbox" ${item.is_global ? 'checked' : ''} onchange="updateItem('${type}', ${idx}, 'is_global', this.checked)">
+                        <label>Global</label>
+                    </div>
+                    <div class="checkbox-group">
+                        <input type="checkbox" ${item.applicable_to_others ? 'checked' : ''} onchange="updateItem('${type}', ${idx}, 'applicable_to_others', this.checked)">
+                        <label>Allies</label>
+                    </div>
+                    <div class="checkbox-group">
+                        <input type="checkbox" ${item.applies_to_self !== false ? 'checked' : ''} onchange="updateItem('${type}', ${idx}, 'applies_to_self', this.checked)">
+                        <label>Self</label>
+                    </div>
+                    <div class="checkbox-group">
+                        <input type="checkbox" ${item.is_true_aoe ? 'checked' : ''} onchange="updateItem('${type}', ${idx}, 'is_true_aoe', this.checked)">
+                        <label>True AoE</label>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Activation Type (SP Type)</label>
+                    <select onchange="updateItem('${type}', ${idx}, 'sp_type', this.value)">
+                        <option value="auto" ${item.sp_type === 'auto' ? 'selected' : ''}>Auto Recovery</option>
+                        <option value="offensive" ${item.sp_type === 'offensive' ? 'selected' : ''}>On Attack</option>
+                        <option value="defensive" ${item.sp_type === 'defensive' ? 'selected' : ''}>Defensive (On Hit / 1.5s)</option>
+                        <option value="Inf-Passive" ${item.sp_type === 'Inf-Passive' ? 'selected' : ''}>Inf-Passive (Always Active)</option>
+                        <option value="Passive" ${item.sp_type === 'Passive' ? 'selected' : ''}>Passive (Once per Deployment)</option>
+                    </select>
+                </div>
+                <div style="display:flex; gap:10px;">
+                    <div class="form-group" style="flex:1;">
+                        <label>Initial SP</label>
+                        <input type="number" placeholder="Init SP" value="${item.initial_sp}" onchange="updateItem('${type}', ${idx}, 'initial_sp', parseInt(this.value))">
+                    </div>
+                    <div class="form-group" style="flex:1;">
+                        <label>SP Cost</label>
+                        <input type="number" placeholder="Cost SP" value="${item.sp_cost}" onchange="updateItem('${type}', ${idx}, 'sp_cost', parseInt(this.value))">
+                    </div>
+                    <div class="form-group" style="flex:1;">
+                        <label>Duration (s)</label>
+                        <input type="number" placeholder="Duration (0=instant, -1=infinite)" value="${item.duration}" onchange="updateItem('${type}', ${idx}, 'duration', parseInt(this.value))">
+                    </div>
+                </div>
+
+                <div style="display:flex; gap:10px;">
+                    <div class="checkbox-group" style="flex:1;">
+                        <input type="checkbox" ${item.is_ammo_based ? 'checked' : ''} onchange="updateItem('${type}', ${idx}, 'is_ammo_based', this.checked)">
+                        <label>Ammo Based</label>
+                    </div>
+                    ${item.is_ammo_based ? `
+                        <div class="form-group" style="flex:1;">
+                            <label>Max Ammo</label>
+                            <input type="number" placeholder="Max Ammo" value="${item.max_ammo || 0}" onchange="updateItem('${type}', ${idx}, 'max_ammo', parseInt(this.value))">
+                        </div>
+                        <div class="form-group" style="flex:1;">
+                            <label>Ammo Cost/Hit</label>
+                            <input type="number" placeholder="Cost" value="${item.ammo_cost || 1}" onchange="updateItem('${type}', ${idx}, 'ammo_cost', parseInt(this.value))">
+                        </div>
+                    ` : ''}
+                    <div class="form-group" style="flex:1;">
+                        <label>Inf after X uses</label>
+                        <input type="number" placeholder="0 = Never" value="${item.infinite_after || 0}" onchange="updateItem('${type}', ${idx}, 'infinite_after', parseInt(this.value))">
+                    </div>
+                    <div class="form-group" style="flex:1;">
+                        <label>Max Charges</label>
+                        <input type="number" min="1" placeholder="1" value="${item.max_charges || 1}" onchange="updateItem('${type}', ${idx}, 'max_charges', parseInt(this.value))">
+                    </div>
+                </div>
+                <div style="display:flex; gap:10px;">
+                    <div class="checkbox-group" style="flex:1;">
+                        <input type="checkbox" ${item.limited_skill ? 'checked' : ''} onchange="updateItem('${type}', ${idx}, 'limited_skill', this.checked)">
+                        <label>Limited Uses</label>
+                    </div>
+                    <div class="form-group" style="flex:1;">
+                        <label>Heal on Activation (Ratio)</label>
+                        <input type="number" step="0.01" placeholder="1.0 = 100%" value="${item.heal_on_activation_ratio || 0.0}" onchange="updateItem('${type}', ${idx}, 'heal_on_activation_ratio', parseFloat(this.value))">
+                    </div>
+                </div>
+                <div style="display:flex; gap:10px;">
+                    ${item.limited_skill ? `
+                        <div class="checkbox-group" style="flex:1;" title="Checked: Limit applies to the entire 5 minutes (True Limit). Unchecked: Limit resets each time the operator is deployed.">
+                            <input type="checkbox" ${item.limit_per_stage ? 'checked' : ''} onchange="updateItem('${type}', ${idx}, 'limit_per_stage', this.checked)">
+                            <label>True Limit (Per Stage)</label>
+                        </div>
+                        <div class="form-group" style="flex:1;" title="How many times the skill can be activated before the limit applies">
+                            <label>Max Allowed Activations</label>
+                            <input type="number" value="${item.amount_skills || 1}" onchange="updateItem('${type}', ${idx}, 'amount_skills', parseInt(this.value))">
+                        </div>
+                    ` : ''}
+                </div>
+                
+                <div style="display:flex; gap:10px; margin-top:10px; padding: 10px; background: rgba(255, 165, 0, 0.1); border-radius: 4px; border-left: 3px solid orange;">
+                    <div class="checkbox-group" style="flex:1;">
+                        <input type="checkbox" ${item.has_overdrive ? 'checked' : ''} onchange="updateItem('${type}', ${idx}, 'has_overdrive', this.checked)">
+                        <label style="color: orange; font-weight: bold;">Has Overdrive (2nd Half Buffs)</label>
+                    </div>
+                </div>
+
+                <div style="display:flex; gap:10px;">
+                    <div class="form-group" style="flex:1;">
+                        <label>Action Type</label>
+                        <select onchange="updateItem('${type}', ${idx}, 'action_type', this.value)">
+                            <option value="none" ${item.action_type === 'none' ? 'selected' : ''}>No Action Override</option>
+                            <option value="damage" ${item.action_type === 'damage' ? 'selected' : ''}>Damage</option>
+                            <option value="heal" ${item.action_type === 'heal' ? 'selected' : ''}>Heal</option>
+                            <option value="both" ${item.action_type === 'both' ? 'selected' : ''}>Both (Damage & Heal)</option>
+                        </select>
+                    </div>
+                    <div class="form-group" style="flex:1;">
+                        <label>Damage Kind</label>
+                        <select onchange="updateItem('${type}', ${idx}, 'dmg_kind', this.value)">
+                            <option value="physical" ${item.dmg_kind === 'physical' ? 'selected' : ''}>Physical</option>
+                            <option value="arts" ${item.dmg_kind === 'arts' ? 'selected' : ''}>Arts</option>
+                            <option value="true" ${item.dmg_kind === 'true' ? 'selected' : ''}>True</option>
+                            <option value="weakness" ${item.dmg_kind === 'weakness' ? 'selected' : ''}>Weakness</option>
+                        </select>
+                    </div>
+                </div>
+                <div style="display:flex; gap:10px;">
+                    <div class="form-group" style="flex:1;">
+                        <label>Damage Mult</label>
+                        <input type="number" step="0.1" placeholder="Dmg Mult" value="${item.dmg_mult || 1.0}" onchange="updateItem('${type}', ${idx}, 'dmg_mult', parseFloat(this.value))">
+                    </div>
+                    <div class="form-group" style="flex:1;">
+                        <label>Heal Mult</label>
+                        <input type="number" step="0.1" placeholder="Heal Mult" value="${item.heal_mult || 0.0}" onchange="updateItem('${type}', ${idx}, 'heal_mult', parseFloat(this.value))">
+                    </div>
+                </div>
+                <div style="margin-top:10px; padding:10px; background:rgba(0,0,0,0.2); border-radius:4px;">
+                    <label><strong>Passive Buffs (Always Active with this skill)</strong></label>
+                    <div id="${type}-${idx}-passive-buffs" style="margin-left: 20px; margin-top:5px;">
+                        ${(item.passive_buffs || []).map((b, bIdx) => renderBuff(type, idx, b, bIdx, true)).join('')}
+                    </div>
+                    <button type="button" onclick="addBuff('${type}', ${idx}, true)" class="text-accent" style="font-size:0.8rem;">+ ADD PASSIVE BUFF</button>
+                </div>
+                ${item.has_overdrive ? `
+                <div style="margin-top:10px; padding:10px; background:rgba(255,165,0,0.1); border-radius:4px; border-left: 3px solid orange;">
+                    <label style="color: orange;"><strong>Overdrive Buffs (Active in 2nd Half)</strong></label>
+                    <div id="${type}-${idx}-overdrive-buffs" style="margin-left: 20px; margin-top:5px;">
+                        ${(item.overdrive_buffs || []).map((b, bIdx) => renderBuff(type, idx, b, bIdx, 'overdrive')).join('')}
+                    </div>
+                    <button type="button" onclick="addBuff('${type}', ${idx}, 'overdrive')" class="text-accent" style="font-size:0.8rem; color: orange;">+ ADD OVERDRIVE BUFF</button>
+                </div>
+                ` : ''}
+                ${summonsSliders}
+            `;
+        } else if (type === 'modules') {
+            return `
+                <div class="form-group">
+                    <label>Module Name</label>
+                    <input type="text" placeholder="Module Name" value="${escapeHTML(item.name)}" onchange="updateItem('${type}', ${idx}, 'name', this.value)" style="width:100%">
+                </div>
+                <div style="display:flex; gap:15px; margin-bottom:10px; background:rgba(255,255,255,0.05); padding:8px; border-radius:4px;">
+                    <div class="checkbox-group">
+                        <input type="checkbox" ${item.is_global ? 'checked' : ''} onchange="updateItem('${type}', ${idx}, 'is_global', this.checked)">
+                        <label>Global</label>
+                    </div>
+                    <div class="checkbox-group">
+                        <input type="checkbox" ${item.applies_to_self !== false ? 'checked' : ''} onchange="updateItem('${type}', ${idx}, 'applies_to_self', this.checked)">
+                        <label>Self</label>
+                    </div>
+                    <div class="checkbox-group">
+                        <input type="checkbox" ${item.is_true_aoe ? 'checked' : ''} onchange="updateItem('${type}', ${idx}, 'is_true_aoe', this.checked)">
+                        <label>True AoE</label>
+                    </div>
+                    <div class="checkbox-group">
+                        <input type="checkbox" ${item.perm_camouflage ? 'checked' : ''} onchange="updateItem('${type}', ${idx}, 'perm_camouflage', this.checked)">
+                        <label>Perm Camouflage</label>
+                    </div>
+                </div>
+            `;
+        } else if (type === 'potentials') {
+            return `
+                <div style="display:flex; gap:10px; align-items:center;">
+                    <label>Level:</label>
+                    <select onchange="updateItem('${type}', ${idx}, 'level', parseInt(this.value))">
+                        ${[2,3,4,5,6].map(l => `<option value="${l}" ${item.level === l ? 'selected' : ''}>Pot ${l}</option>`).join('')}
+                    </select>
+                </div>
+            `;
+        } else if (type === 'summons') {
+            return `
+                <div class="form-group"><label>Summon Name</label><input type="text" value="${escapeHTML(item.name)}" onchange="updateItem('${type}', ${idx}, 'name', this.value)"></div>
+                <div class="form-group"><label>Position</label>
+                    <select onchange="updateItem('${type}', ${idx}, 'position', this.value)">
+                        <option value="ground" ${item.position==='ground'?'selected':''}>Ground</option>
+                        <option value="ranged" ${item.position==='ranged'?'selected':''}>Ranged</option>
+                    </select>
+                </div>
+                <div class="checkbox-group" style="margin-bottom: 10px; background:rgba(255,255,255,0.05); padding:8px; border-radius:4px;">
+                    <input type="checkbox" ${item.always_active ? 'checked' : ''} onchange="updateItem('${type}', ${idx}, 'always_active', this.checked)">
+                    <label style="color:var(--accent);">Deploy Immediately (Always Active)</label>
+                </div>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+                    <div class="form-group"><label>Base HP</label><input type="number" value="${item.base_stats?.hp || 0}" onchange="updateSummonBaseStat(${idx}, 'hp', parseInt(this.value))"></div>
+                    <div class="form-group"><label>Base ATK</label><input type="number" value="${item.base_stats?.atk || 0}" onchange="updateSummonBaseStat(${idx}, 'atk', parseInt(this.value))"></div>
+                    <div class="form-group"><label>Base DEF</label><input type="number" value="${item.base_stats?.def || 0}" onchange="updateSummonBaseStat(${idx}, 'def', parseInt(this.value))"></div>
+                    <div class="form-group"><label>Base RES</label><input type="number" value="${item.base_stats?.res || 0}" onchange="updateSummonBaseStat(${idx}, 'res', parseInt(this.value))"></div>
+                    <div class="form-group"><label>Base Interval</label><input type="number" step="0.01" value="${item.base_stats?.base_interval || 1.0}" onchange="updateSummonBaseStat(${idx}, 'base_interval', parseFloat(this.value))"></div>
+                    <div class="form-group"><label>DP Cost</label><input type="number" value="${item.base_stats?.dp_cost || 0}" onchange="updateSummonBaseStat(${idx}, 'dp_cost', parseInt(this.value))"></div>
+                </div>
+
+                <div style="margin-top:20px; border-top:1px solid #444; padding-top:10px;">
+                    <h6>Summon Talents</h6>
+                    <div style="margin-left:10px;">
+                        ${(item.talents || []).map((t, tIdx) => `
+                            <div style="background:rgba(0,0,0,0.2); padding:10px; margin-bottom:10px;">
+                                <div style="display:flex; justify-content:space-between;">
+                                    <b>Talent #${tIdx+1}</b>
+                                    <button type="button" class="text-accent" onclick="removeItem('summon-${idx}-talents', ${tIdx})">REMOVE</button>
+                                </div>
+                                <div class="form-group"><label>Name</label><input type="text" value="${escapeHTML(t.name)}" onchange="updateItem('summon-${idx}-talents', ${tIdx}, 'name', this.value)"></div>
+                                <div>
+                                    <strong>Buffs:</strong>
+                                    <div style="margin-left: 20px;">
+                                        ${(t.buffs || []).map((b, bIdx) => renderBuff(`summon-${idx}-talents`, tIdx, b, bIdx)).join('')}
+                                    </div>
+                                    <button type="button" onclick="addBuff('summon-${idx}-talents', ${tIdx})" class="text-accent" style="font-size:0.8rem;">+ ADD BUFF</button>
+                                </div>
+                            </div>
+                        `).join('')}
+                        <button type="button" onclick="addItem('summon-${idx}-talents')" class="text-accent">+ ADD SUMMON TALENT</button>
+                    </div>
+
+                    <h6 style="margin-top:20px;">Summon Skills</h6>
+                    <div style="margin-left:10px;">
+                        ${(item.skills || []).map((s, sIdx) => `
+                            <div style="background:rgba(0,0,0,0.2); padding:10px; margin-bottom:10px;">
+                                <div style="display:flex; justify-content:space-between;">
+                                    <b>Skill #${sIdx+1}</b>
+                                    <button type="button" class="text-accent" onclick="removeItem('summon-${idx}-skills', ${sIdx})">REMOVE</button>
+                                </div>
+                                <div class="form-group"><label>Name</label><input type="text" value="${escapeHTML(s.name)}" onchange="updateItem('summon-${idx}-skills', ${sIdx}, 'name', this.value)"></div>
+                                <div>
+                                    <strong>Buffs:</strong>
+                                    <div style="margin-left: 20px;">
+                                        ${(s.buffs || []).map((b, bIdx) => renderBuff(`summon-${idx}-skills`, sIdx, b, bIdx)).join('')}
+                                    </div>
+                                    <button type="button" onclick="addBuff('summon-${idx}-skills', ${sIdx})" class="text-accent" style="font-size:0.8rem;">+ ADD BUFF</button>
+                                </div>
+                            </div>
+                        `).join('')}
+                        <button type="button" onclick="addItem('summon-${idx}-skills')" class="text-accent">+ ADD SUMMON SKILL</button>
+                    </div>
+                </div>
+            `;
+        }
+        return '';
+    }
+
+    function addItem(type) {
+        const ctxList = resolveList(type);
+        if (type.includes('talents')) ctxList.push({ name: "New Talent", buffs: [], action_type: "none", dmg_kind: "physical", is_global: false, applies_to_self: true, is_true_aoe: false, only_during_skill: false });
+        else if (type.includes('skills')) ctxList.push({ name: "New Skill", sp_type: "auto", sp_cost: 30, initial_sp: 0, duration: 20, buffs: [], action_type: "none", dmg_mult: 1.0, heal_mult: 0.0, is_global: false, applies_to_self: true, is_true_aoe: false, is_ammo_based: false, max_ammo: 0, ammo_cost: 1 });
+        else if (type === 'modules') ctxList.push({ name: "New Module", buffs: [], is_global: false, applies_to_self: true, is_true_aoe: false });
+        else if (type === 'potentials') ctxList.push({ level: 2, buffs: [] });
+        else if (type === 'summons') ctxList.push({
+            name: "New Summon",
+            position: "ground",
+            base_stats: { hp: 0, atk: 0, def: 0, res: 0, base_interval: 1.0, dp_cost: 0, redeployment_time: 70 },
+            talents: [], skills: []
+        });
+        renderLists();
+    }
+
+    function updateSummonBaseStat(summonIdx, field, val) {
+        if (typeof val === 'number' && isNaN(val)) val = 0;
+        SELECTED_OP.summons[summonIdx].base_stats[field] = val;
+    }
+
+    function removeItem(type, idx) {
+        const ctxList = resolveList(type);
+        ctxList.splice(idx, 1);
+        renderLists();
+    }
+
+    function updateItem(type, idx, field, val) {
+        const ctxList = resolveList(type);
+        // Safety check for numeric fields
+        if (typeof val === 'number' && isNaN(val)) {
+            if (field === 'max_charges') val = 1;
+            else val = 0;
+        }
+        ctxList[idx][field] = val;
+        // Re-render if stat changes to show/hide dynamic fields
+        if (field === 'stat' || field === 'is_ammo_based' || field === 'has_overdrive') renderLists();
+    }
+
+    function updateSummonsActive(type, idx, summonName, count) {
+        const ctxList = resolveList(type);
+        let active = ctxList[idx].summons_active || [];
+        active = active.filter(n => n !== summonName); // remove all old copies
+        for(let i=0; i<count; i++) active.push(summonName);
+        ctxList[idx].summons_active = active;
+    }
+
+    function addBuff(type, idx, isPassive = false) {
+        let listField = 'buffs';
+        if (isPassive === true) listField = 'passive_buffs';
+        else if (isPassive === 'overdrive') listField = 'overdrive_buffs';
+        
+        const ctxList = resolveList(type);
+        if (!ctxList[idx][listField]) ctxList[idx][listField] = [];
+        ctxList[idx][listField].push({ stat: "atk", buff_type: "ratio", value: 0.1, immediate_dmg_kind: "physical", is_true_aoe: false });
+        renderLists();
+    }
+
+    function updateBuff(type, idx, bIdx, field, val, isPassive = false) {
+        let listField = 'buffs';
+        if (isPassive === true) listField = 'passive_buffs';
+        else if (isPassive === 'overdrive') listField = 'overdrive_buffs';
+        
+        const ctxList = resolveList(type);
+        ctxList[idx][listField][bIdx][field] = val;
+        // Re-render if stat changes to show/hide dynamic fields
+        if (field === 'stat' || field === 'decay') renderLists();
+    }
+
+    function removeBuff(type, idx, bIdx, isPassive = false) {
+        let listField = 'buffs';
+        if (isPassive === true) listField = 'passive_buffs';
+        else if (isPassive === 'overdrive') listField = 'overdrive_buffs';
+        
+        const ctxList = resolveList(type);
+        ctxList[idx][listField].splice(bIdx, 1);
+        renderLists();
+    }
+
+
+
+    document.getElementById('save-op').addEventListener('click', async () => {
+        const formData = new FormData();
+        
+        // Assemble operator data
+        const opId = document.getElementById('op-id').value;
+        const opFinal = {
+            ...SELECTED_OP,
+            operator_id: opId ? parseInt(opId) : null,
+            name: document.getElementById('op-name').value,
+            rarity: parseInt(document.getElementById('op-rarity').value) || 6,
+            class_id: parseInt(document.getElementById('op-class').value),
+            branch_id: parseInt(document.getElementById('op-branch').value),
+            position: document.getElementById('op-position').value,
+            is_summon: document.getElementById('op-is-summon').checked,
+            base_stats: {
+                hp: [0, 0, 0, parseInt(document.getElementById('base-hp').value) || 0],
+                atk: [0, 0, 0, parseInt(document.getElementById('base-atk').value) || 0],
+                def: [0, 0, 0, parseInt(document.getElementById('base-def').value) || 0],
+                res: parseInt(document.getElementById('base-res').value) || 0,
+                base_interval: parseFloat(document.getElementById('base-interval').value) || 1.0,
+                dp_cost: parseInt(document.getElementById('base-dp').value) || 10,
+                redeployment_time: parseInt(document.getElementById('base-redeploy').value) || 70
+            },
+            trust_stats: {
+                hp: parseInt(document.getElementById('trust-hp').value) || 0,
+                atk: parseInt(document.getElementById('trust-atk').value) || 0,
+                def: parseInt(document.getElementById('trust-def').value) || 0,
+                res: parseInt(document.getElementById('trust-res').value) || 0
+            }
+        };
+
+        formData.append('data', JSON.stringify(opFinal));
+        
+        const photoInput = document.getElementById('op-photo-upload');
+        if (photoInput.files[0]) {
+            formData.append('photo', photoInput.files[0]);
+        }
+
+        try {
+            const response = await fetch('/api/operators/save', {
+                method: 'POST',
+                body: formData
+            });
+            const resData = await response.json();
+            if (response.ok) {
+                alert('Operator saved!');
+                location.reload();
+            } else {
+                alert('Error: ' + resData.detail);
+            }
+        } catch (e) {
+            console.error(e);
+            alert('Error saving operator.');
+        }
+    });
+
+    function selectOperator(id) {
+        location.href = `/editor?op_id=${id}`;
+    }
+
+    // Simple search
+    document.getElementById('op-search').addEventListener('input', (e) => {
+        const term = e.target.value.toLowerCase();
+        document.querySelectorAll('.op-list-item').forEach(item => {
+            const name = item.innerText.toLowerCase();
+            item.style.display = name.includes(term) ? 'table-row' : 'none';
+        });
+    });
+</script>
+{% endblock %}

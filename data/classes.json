@@ -1,0 +1,111 @@
+{
+  "classes": [
+    {
+      "class_id": 1,
+      "name": "Caster",
+      "branches": [
+        {"branch_id": 101, "name": "Blast", "base_interval": 2.85, "block_count": 1, "description": "Deals Arts damage to all enemies in range."},
+        {"branch_id": 102, "name": "Chain", "base_interval": 2.3, "block_count": 1, "description": "Arts damage jumps between enemies."},
+        {"branch_id": 103, "name": "Core", "base_interval": 1.6, "block_count": 1, "description": "Standard single-target Arts damage."},
+        {"branch_id": 104, "name": "Mech-Accord", "base_interval": 1.3, "block_count": 1, "description": "Controls a Drone to deal Arts damage."},
+        {"branch_id": 105, "name": "Mystic", "base_interval": 3.0, "block_count": 1, "description": "Attacks deal Arts damage; can store attacks."},
+        {"branch_id": 106, "name": "Phalanx", "base_interval": 2.0, "block_count": 1, "description": "Massive DEF while skills inactive; attacks all enemies in range."},
+        {"branch_id": 107, "name": "Splash", "base_interval": 2.9, "block_count": 1, "description": "Deals area-of-effect Arts damage."}
+      ]
+    },
+    {
+      "class_id": 2,
+      "name": "Defender",
+      "branches": [
+        {"branch_id": 201, "name": "Arts Protector", "base_interval": 1.6, "block_count": 3, "description": "Deals Arts damage while skill is active."},
+        {"branch_id": 202, "name": "Duelist", "base_interval": 1.5, "block_count": 1, "description": "High ATK but only blocks one enemy."},
+        {"branch_id": 203, "name": "Fortress", "base_interval": 2.8, "block_count": 3, "description": "Long-range AoE Physical damage."},
+        {"branch_id": 204, "name": "Guardian", "base_interval": 1.2, "block_count": 3, "description": "Can heal allies."},
+        {"branch_id": 205, "name": "Juggernaut", "base_interval": 1.6, "block_count": 3, "description": "Cannot be healed by others."},
+        {"branch_id": 206, "name": "Protector", "base_interval": 1.2, "block_count": 3, "description": "High defense, blocks three enemies."},
+        {"branch_id": 207, "name": "Sentinel Protector", "base_interval": 1.2, "block_count": 3, "description": "Can attack from a distance."}
+      ]
+    },
+    {
+      "class_id": 3,
+      "name": "Guard",
+      "branches": [
+        {"branch_id": 301, "name": "Arts Fighter", "base_interval": 1.25, "block_count": 1, "description": "Deals Arts damage."},
+        {"branch_id": 302, "name": "Centurion", "base_interval": 1.2, "block_count": 3, "description": "Attacks all blocked enemies."},
+        {"branch_id": 303, "name": "Crusher", "base_interval": 2.5, "block_count": 2, "description": "High ATK and HP but 0 DEF."},
+        {"branch_id": 304, "name": "Dreadnought", "base_interval": 1.5, "block_count": 1, "description": "High ATK and HP."},
+        {"branch_id": 305, "name": "Fighter", "base_interval": 0.78, "block_count": 1, "description": "High attack speed."},
+        {"branch_id": 306, "name": "Instructor", "base_interval": 1.05, "block_count": 2, "description": "Can attack from range; buffs other units."},
+        {"branch_id": 307, "name": "Liberator", "base_interval": 1.2, "block_count": 0, "description": "Doesn't attack/block unless skill active."},
+        {"branch_id": 308, "name": "Lord", "base_interval": 1.3, "block_count": 2, "description": "Ranged physical attacks."},
+        {"branch_id": 309, "name": "Musha", "base_interval": 1.2, "block_count": 1, "description": "Heals self when attacking; cannot be healed by others."},
+        {"branch_id": 310, "name": "Reaper", "base_interval": 1.3, "block_count": 2, "description": "AoE attacks; heals self per hit."},
+        {"branch_id": 311, "name": "Swordmaster", "base_interval": 1.3, "block_count": 2, "description": "Attacks deal damage twice."}
+      ]
+    },
+    {
+      "class_id": 4,
+      "name": "Medic",
+      "branches": [
+        {"branch_id": 401, "name": "Medic (ST)", "base_interval": 2.85, "block_count": 1, "description": "Standard single-target healer."},
+        {"branch_id": 402, "name": "Multi-target (AoE)", "base_interval": 2.85, "block_count": 1, "description": "Heals up to 3 allies."},
+        {"branch_id": 403, "name": "Therapist", "base_interval": 2.85, "block_count": 1, "description": "Wide range; reduces negative status duration."},
+        {"branch_id": 404, "name": "Wandering", "base_interval": 2.85, "block_count": 1, "description": "Heals Elemental Damage."},
+        {"branch_id": 405, "name": "Incantation", "base_interval": 1.6, "block_count": 1, "description": "Attacks enemies and heals allies."},
+        {"branch_id": 406, "name": "Chain", "base_interval": 2.85, "block_count": 1, "description": "Healing bounces between allies."}
+      ]
+    },
+    {
+      "class_id": 5,
+      "name": "Sniper",
+      "branches": [
+        {"branch_id": 501, "name": "Artilleryman", "base_interval": 2.8, "block_count": 1, "description": "Long-range AoE physical damage."},
+        {"branch_id": 502, "name": "Besieger", "base_interval": 2.4, "block_count": 1, "description": "Targets the heaviest enemies first."},
+        {"branch_id": 503, "name": "Deadeye", "base_interval": 2.7, "block_count": 1, "description": "Prioritizes enemies with lowest DEF."},
+        {"branch_id": 504, "name": "Flinger", "base_interval": 2.1, "block_count": 1, "description": "AoE physical attacks hit twice."},
+        {"branch_id": 505, "name": "Heavyshooter", "base_interval": 1.6, "block_count": 1, "description": "High damage, short range."},
+        {"branch_id": 506, "name": "Hunter", "base_interval": 1.0, "block_count": 1, "description": "Uses ammo for rapid attacks."},
+        {"branch_id": 507, "name": "Marksman", "base_interval": 1.0, "block_count": 1, "description": "Prioritizes aerial targets."},
+        {"branch_id": 508, "name": "Spreadshooter", "base_interval": 2.3, "block_count": 1, "description": "AoE physical attacks in a wide range."}
+      ]
+    },
+    {
+      "class_id": 6,
+      "name": "Specialist",
+      "branches": [
+        {"branch_id": 601, "name": "Ambusher", "base_interval": 3.5, "block_count": 0, "description": "AoE attacks; has innate dodge."},
+        {"branch_id": 602, "name": "Dollkeeper", "base_interval": 1.2, "block_count": 2, "description": "Leaves a substitute when defeated."},
+        {"branch_id": 603, "name": "Executor", "base_interval": 0.93, "block_count": 1, "description": "Fast redeployment."},
+        {"branch_id": 604, "name": "Geek", "base_interval": 1.3, "block_count": 1, "description": "Constantly loses HP; buffs self/allies."},
+        {"branch_id": 605, "name": "Hookmaster", "base_interval": 1.8, "block_count": 2, "description": "Pulls enemies."},
+        {"branch_id": 606, "name": "Merchant", "base_interval": 1.0, "block_count": 1, "description": "Consumes DP over time."},
+        {"branch_id": 607, "name": "Push Stroker", "base_interval": 1.2, "block_count": 2, "description": "Pushes enemies."},
+        {"branch_id": 608, "name": "Trapmaster", "base_interval": 0.85, "block_count": 1, "description": "Uses traps to attack."}
+      ]
+    },
+    {
+      "class_id": 7,
+      "name": "Supporter",
+      "branches": [
+        {"branch_id": 701, "name": "Abjurer", "base_interval": 1.6, "block_count": 1, "description": "Deals Arts damage; heals while skill active."},
+        {"branch_id": 702, "name": "Artificer", "base_interval": 1.5, "block_count": 2, "description": "Uses support devices."},
+        {"branch_id": 703, "name": "Bard", "base_interval": 1.0, "block_count": 1, "description": "Does not attack; buffs allies in range."},
+        {"branch_id": 704, "name": "Decel Binder", "base_interval": 1.9, "block_count": 1, "description": "Deals Arts damage and slows."},
+        {"branch_id": 705, "name": "Hexer", "base_interval": 1.6, "block_count": 1, "description": "Debuffs enemies."},
+        {"branch_id": 706, "name": "Ritualist", "base_interval": 1.3, "block_count": 1, "description": "Deals Elemental Damage."},
+        {"branch_id": 707, "name": "Summoner", "base_interval": 1.6, "block_count": 1, "description": "Uses summons to fight."}
+      ]
+    },
+    {
+      "class_id": 8,
+      "name": "Vanguard",
+      "branches": [
+        {"branch_id": 801, "name": "Agent", "base_interval": 1.0, "block_count": 1, "description": "Fast redeployment; generates DP on attack."},
+        {"branch_id": 802, "name": "Charger", "base_interval": 1.0, "block_count": 1, "description": "Generates DP on kill; full refund on retreat."},
+        {"branch_id": 803, "name": "Pioneer", "base_interval": 1.05, "block_count": 2, "description": "Standard DP generation."},
+        {"branch_id": 804, "name": "Standard Bearer", "base_interval": 1.3, "block_count": 0, "description": "Massive DP generation; cannot block during skill."},
+        {"branch_id": 805, "name": "Tactician", "base_interval": 1.0, "block_count": 1, "description": "Uses a summons; generates DP."}
+      ]
+    }
+  ]
+}

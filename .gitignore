@@ -1,0 +1,36 @@
+# Rust build artifacts
+target/
+rust_engine/target/
+*.pdb
+
+# Python cache & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+
+# External reference repository
+myrtle-main/
+
+# Temporary files & logs
+*.tmp
+*.log
+*.zip
+scratch/
+
+# Operating System files
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# IDE & Editor settings
+.vscode/
+.idea/
+*.swp
+*.swo
