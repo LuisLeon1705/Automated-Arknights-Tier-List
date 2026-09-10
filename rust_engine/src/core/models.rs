@@ -247,8 +247,15 @@ impl Skill {
         }
     }
 
+    pub fn is_passive(&self) -> bool {
+        self.sp_type == "8"
+            || self.sp_type == "Passive"
+            || self.sp_type == "Inf-Passive"
+            || (self.sp_cost <= 0.0 && self.duration <= 0.0)
+    }
+
     pub fn is_infinite_or_toggle(&self) -> bool {
-        self.get_infinite_after() > 0 || self.sp_type == "Inf-Passive"
+        self.is_passive() || self.get_infinite_after() > 0
     }
 }
 
@@ -541,7 +548,7 @@ impl Operator {
                     buffs.push(b_clone);
                 }
             }
-            if self.is_skill_active || skill.sp_type == "Inf-Passive" {
+            if self.is_skill_active || skill.is_passive() {
                 for b in &skill.buffs {
                     if b.applies_to(self) {
                         let mut b_clone = b.clone();
@@ -1625,7 +1632,7 @@ impl Operator {
         }
         
         if let Some(skill) = &self.equipped_skill {
-            if skill.sp_type == "Inf-Passive" || self.is_skill_active {
+            if self.is_skill_active || skill.is_passive() {
                 if skill.action_type != "none" {
                     act = skill.action_type.clone();
                     d_m = skill.dmg_mult;

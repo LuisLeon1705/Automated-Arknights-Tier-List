@@ -11,7 +11,7 @@ The project is built on a high-performance **Rust** simulation core serving an i
 ```
 TierList/
 ├── .gitignore                  # Git exclusions (Rust build artifacts, myrtle-main, logs, zips)
-├── CHANGELOG.md                # Version history & patch notes (v1.0.0)
+├── CHANGELOG.md                # Version history & patch notes (v1.0.1)
 ├── GEMINI.md                   # System rules and architectural overview
 ├── README.md                   # Project presentation and myrtle.moe attribution
 ├── DOCUMENTATION.md            # Comprehensive technical documentation & API reference

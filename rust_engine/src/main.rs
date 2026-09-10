@@ -236,10 +236,10 @@ async fn run_simulation_batch(Json(payload): Json<BatchSimulationRequest>) -> im
                 
                 if skill_index >= 0 && (skill_index as usize) < op.skills.len() {
                     op.equipped_skill = Some(op.skills[skill_index as usize].clone());
-                    op.current_state = op.equipped_skill.as_ref().unwrap().name.clone();
+                    op.change_state(Some(skill_index.to_string()));
                 } else {
                     op.equipped_skill = None;
-                    op.current_state = "RAW (No Skill)".to_string();
+                    op.change_state(None);
                 }
                 
                 let orig_skill_name = op.equipped_skill.as_ref().map(|s| s.name.clone()).unwrap_or_else(|| "None".to_string());
@@ -380,6 +380,13 @@ fn evaluate_single_operator(op_name: &str, _apply_decay: bool, loader: &core::da
             }
             if let Some(arts) = dmg_split.get_mut("arts") {
                 *arts *= 1.0 - avg_enemy.dodge_arts;
+            }
+
+            let t_skill_time = *dmg_split.get("t_skill").unwrap_or(&300.0);
+            if t_skill_time <= 0.0 {
+                // If skill was never activated during combat (e.g. Duelist unable to block heavier enemy to charge SP),
+                // evaluate survivability and field stats in unbuffed base state.
+                op.change_state(None);
             }
 
             let arts_surv = op.calculate_ehp_arts_against(avg_enemy.atk);
@@ -649,7 +656,7 @@ fn evaluate_single_operator(op_name: &str, _apply_decay: bool, loader: &core::da
             if let Some(s) = &op.equipped_skill {
                 let s_cost = s.sp_cost;
                 let s_dur = s.duration;
-                if s.is_infinite_or_toggle() {
+                if s.is_infinite_or_toggle() || s.is_passive() {
                     eff_score = 100.0;
                 } else if s_cost > 0.0 && s_dur > 0.0 {
                     let mut uptime_r = s_dur / (s_dur + s_cost);
@@ -657,8 +664,6 @@ fn evaluate_single_operator(op_name: &str, _apply_decay: bool, loader: &core::da
                         uptime_r = s_dur / (s_dur + (s_cost * 2.5));
                     }
                     eff_score = uptime_r * 100.0;
-                } else if s.sp_type == "Passive" {
-                    eff_score = 100.0;
                 }
             } else {
                 eff_score = 100.0;
@@ -1076,8 +1081,12 @@ async fn run_simulation(Json(payload): Json<SimulateRequest>) -> impl IntoRespon
     if let Some(idx) = payload.skill_index {
         if idx < op.skills.len() {
             op.equipped_skill = Some(op.skills[idx].clone());
-            op.current_state = op.skills[idx].name.clone();
+            op.change_state(Some(idx.to_string()));
+        } else {
+            op.change_state(None);
         }
+    } else {
+        op.change_state(None);
     }
     
     let orig_skill_name = op.equipped_skill.as_ref().map(|s| s.name.clone()).unwrap_or_else(|| "None".to_string());

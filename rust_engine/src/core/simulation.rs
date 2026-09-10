@@ -616,32 +616,15 @@ impl SimulationEnvironment {
 
         // EUNECTES (Duelist Defender, char_416_zumama)
         if op.is_char("char_416_zumama") || op.name == "Eunectes" || op.name.contains("森蚺") {
+            r.attacks_per_sec = 1.0 / interval;
+            r.shots_per_attack = 1.0;
+            r.phys_per_shot = atk;
+            r.target_limit = 1.0;
             if is_skill {
                 if s_name.contains("钢铁") || s_name.contains("Iron Will") || s_name.contains("Skill 3") {
-                    // S3 (Iron Will): ATK +230%, DEF +160%, Block +2, HP regen 6%/s
-                    // But after 35s duration, she self-stuns for 5 seconds!
-                    // And 0 SP recovery unless blocking an enemy!
-                    r.attacks_per_sec = 1.0 / interval;
-                    r.shots_per_attack = 1.0;
-                    r.phys_per_shot = atk * 3.3;
+                    // S3 (Iron Will) grants 6%/s HP regen during activation
                     r.heal_per_sec = op.final_hp() * 0.06;
-                    r.target_limit = 1.0;
-                } else if s_name.contains("震慑") {
-                    r.attacks_per_sec = 1.0 / interval;
-                    r.shots_per_attack = 1.0;
-                    r.phys_per_shot = atk * 1.8;
-                    r.target_limit = 1.0;
-                } else {
-                    r.attacks_per_sec = 1.0 / interval;
-                    r.shots_per_attack = 1.0;
-                    r.phys_per_shot = atk * 1.15;
-                    r.target_limit = 1.0;
                 }
-            } else {
-                r.attacks_per_sec = 1.0 / interval;
-                r.shots_per_attack = 1.0;
-                r.phys_per_shot = atk;
-                r.target_limit = 1.0;
             }
             return r;
         }
@@ -1099,19 +1082,43 @@ impl SimulationEnvironment {
         let sp_type = skill.sp_type.as_str();
         let b_int = self.primary_operator.final_interval().max(0.1);
         let is_duelist = self.primary_operator.is_duelist();
+        let mut charging_op = self.primary_operator.clone();
+        charging_op.is_skill_active = false;
+        let base_block = charging_op.calculate_stat("block_count");
+        let target_weight = self.target_stats.get("weight").copied().unwrap_or(0.0);
+        let can_block = base_block >= target_weight;
         let sp_rate = if is_duelist {
-            if boss_hit_interval.is_some() {
-                // Against a single boss, Duelist continuously blocks the boss
+            let unblocked_ratio = {
+                let r = self.primary_operator.calculate_stat("sp_recover_ratio");
+                // MOD-X (HES-X / DUA-X) upgrades the trait so that when not blocking, SP recovers at 20% of normal rate
+                if r < -0.1 && r > -0.9 {
+                    1.0 + r // e.g. 1.0 + (-0.8) = 0.20 (20% of normal rate)
+                } else {
+                    0.0
+                }
+            };
+            if !can_block {
+                // Cannot block enemies whose weight exceeds block count;
+                // If operator has MOD-X, recovers SP at unblocked rate (20%); otherwise 0 SP
+                if unblocked_ratio > 0.05 {
+                    unblocked_ratio * (1.0 + self.primary_operator.calculate_stat("sp_recovery_per_sec")).max(0.1)
+                } else {
+                    0.0
+                }
+            } else if boss_hit_interval.is_some() || self.target_stats.get("is_boss").copied().unwrap_or(0.0) > 0.0 {
+                // Against a single target that can be blocked, Duelist continuously blocks
                 (1.0 + self.primary_operator.calculate_stat("sp_recovery_per_sec")).max(0.1)
             } else {
-                // In wave clear, mobs die quickly and waves have breaks, so block uptime is severely limited (~25%)
-                0.25 * (1.0 + self.primary_operator.calculate_stat("sp_recovery_per_sec")).max(0.1)
+                // In wave clear, mobs die quickly and waves have breaks, so block uptime is limited (~25%)
+                let blocked_part = 0.25 * (1.0 + self.primary_operator.calculate_stat("sp_recovery_per_sec")).max(0.1);
+                let unblocked_part = 0.75 * unblocked_ratio * (1.0 + self.primary_operator.calculate_stat("sp_recovery_per_sec")).max(0.1);
+                blocked_part + unblocked_part
             }
         } else {
             (1.0 + self.primary_operator.calculate_stat("sp_recovery_per_sec")).max(0.1)
         };
 
-        if sp_type == "8" || sp_type == "Passive" || sp_type == "Inf-Passive" || (cost <= 0.0 && skill.duration <= 0.0) {
+        if skill.is_passive() {
             let is_executor = self.primary_operator.is_executor();
             if is_executor {
                 let mut dur = if skill.duration > 0.0 {
@@ -1198,7 +1205,17 @@ impl SimulationEnvironment {
                 ((cost - init).max(0.0) * hit_interval, cost * hit_interval)
             },
             // INCREASE_WITH_TIME / "1" / unknown: natural SP recovery
-            _ => ((cost - init).max(0.0) / sp_rate, cost / sp_rate),
+            _ => {
+                if sp_rate <= 0.0 {
+                    if init >= cost && cost > 0.0 {
+                        (0.0, 1e9)
+                    } else {
+                        (1e9, 1e9)
+                    }
+                } else {
+                    ((cost - init).max(0.0) / sp_rate, cost / sp_rate)
+                }
+            },
         };
 
         charge_normal += stun_after;
@@ -1308,9 +1325,14 @@ impl SimulationEnvironment {
         let mut t_left = max_time;
         let mut t_base = charge_first.min(t_left);
         t_left -= t_base;
-        let mut t_skill = dur.min(t_left);
-        t_left -= t_skill;
-        let mut n_casts = 1.0;
+        let mut t_skill = 0.0;
+        let mut n_casts = 0.0;
+
+        if t_left > 0.0 {
+            t_skill = dur.min(t_left);
+            t_left -= t_skill;
+            n_casts = 1.0;
+        }
 
         if t_left > 0.0 && !infinite {
             let cycle = charge_normal + dur;
@@ -1429,6 +1451,8 @@ impl SimulationEnvironment {
         dmg_split.insert("defeat_count".to_string(), defeat_count);
         dmg_split.insert("combat_uptime_factor".to_string(), combat_uptime_factor);
         dmg_split.insert("total_dp".to_string(), total_dp);
+        dmg_split.insert("t_skill".to_string(), t_skill);
+        dmg_split.insert("n_casts".to_string(), n_casts);
 
         let b_int = self.primary_operator.final_interval().max(0.1);
         let mut s_int = b_int;
@@ -1485,7 +1509,7 @@ impl SimulationEnvironment {
                 s_int
             }
         }).unwrap_or(s_int);
-        let max_burst = s_dps_total * skill_dur + end_burst;
+        let max_burst = if n_casts <= 0.0 { 0.0 } else { s_dps_total * skill_dur + end_burst };
         dmg_split.insert("max_damage_per_cast".to_string(), max_burst);
 
         // Sampled cumulative curves (31 points over 300s) for the UI charts
@@ -1593,8 +1617,16 @@ impl SimulationEnvironment {
 
         if b_dps <= 0.0 && s_dps <= 0.0 { return 1800.0; }
 
-        // Against boss: skill starts active at engagement (start_with_skill: true) and block one (boss hit interval)
-        let (t_base, t_skill, n_casts) = self.get_cycle_times_custom(300.0, true, Some(e_interval));
+        // Against boss: skill starts active at engagement IF operator can block or is not a duelist blocked by weight
+        let is_duelist = self.primary_operator.is_duelist();
+        let target_weight = self.target_stats.get("weight").copied().unwrap_or(0.0);
+        let mut charging_op = self.primary_operator.clone();
+        charging_op.is_skill_active = false;
+        let base_block = charging_op.calculate_stat("block_count");
+        let can_block = base_block >= target_weight;
+        let start_with_skill = if is_duelist && !can_block { false } else { true };
+        let boss_block_interval = if can_block { Some(e_interval) } else { None };
+        let (t_base, t_skill, n_casts) = self.get_cycle_times_custom(300.0, start_with_skill, boss_block_interval);
         let mut avg_dps = ((b_dps * t_base) + (s_dps * t_skill)) / 300.0;
         if end_burst > 0.0 { avg_dps += end_burst * n_casts / 300.0; }
 

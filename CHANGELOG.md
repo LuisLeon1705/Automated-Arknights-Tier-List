@@ -6,6 +6,33 @@ El formato se basa en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/
 
 ---
 
+## [1.0.1] - Duelist Weight & Blocking Fix (2026-09-09)
+
+### 🐛 Correcciones de Balance y Mecánicas
+
+#### Restricción de Bloqueo por Peso y Recuperación por Módulo en Duelist Defenders (Eunectes, Aurora, Cement)
+- **Regla Canónica de Bloqueo**: Se implementó la restricción canónica por la cual ningún operador puede bloquear a un enemigo cuyo peso (*weight*) supere su capacidad efectiva de bloqueo (*block count*).
+- **Recuperación Condicional de SP**: El rasgo propio del arquetipo Duelist (*"Solo recupera SP al bloquear a un enemigo"*) ahora valida rigurosamente si el objetivo puede ser bloqueado en estado base (bloqueo 1):
+  - Frente a **Jefes** (peso 5.0–6.0) y **Élites** (peso 3.0–4.0), al superar ampliamente el bloqueo unitario de los Duelistas, estos **no pueden bloquearlos**, lo que resulta en una tasa de recarga de $\mathbf{0.0\text{ SP/s}}$ sin módulo o con MOD-Y.
+  - Se eliminó el error que asumía bloqueo continuo garantizado frente a cualquier jefe sin verificar su peso.
+  - Se corrigió la evaluación de la fase de carga para que no asuma anticipadamente el bloqueo adicional otorgado por la habilidad activa (como el +2 de bloqueo en *Iron Will* de Eunectes) antes de haber sido activada.
+- **Mecánica de Módulo MOD-X (DUA-X / HES-X)**:
+  - Se modeló la mejora de rasgo de **MOD-X** (`sp_recover_ratio = -0.8`), que permite recuperar SP fuera de bloqueo al **20% de la velocidad normal** ($\sim 0.20\text{ SP/s} \times (1 + \text{sp\_recovery\_per\_sec})$).
+  - Gracias a esto, Eunectes con MOD-X puede acumular SP lentamente contra jefes pesados sin necesidad de bloquearlos, logrando activar su S3 (2 activaciones en 300s, infligiendo 132,895 de daño y venciendo al jefe en 656s) a diferencia de su estado sin módulo (tiempo de espera / timeout a 1800s).
+- **Mecánica de Módulo MOD-Y (DUA-Y / HES-Y)**:
+  - Mantiene el rasgo sin recarga fuera de bloqueo (`sp_recover_ratio = -0.999`), pero recompensa con estadísticas pasivas superiores (+15% ATK y +15% DEF permanentes al bloquear y daño mitigado) para combate frente a enemigos bloqueables.
+- **Normalización de Rendimiento**:
+  - Al no poder cargar sus habilidades de ráfaga frente a jefes o élites pesados (a menos que equipen MOD-X), los Duelistas combaten en su estado base, reflejando su desempeño empírico real.
+  - Al permanecer en su estado base con 1 de bloqueo, se les aplica adecuadamente la penalización por déficit de contención en clases de Defensores frente a hordas.
+
+#### Normalización y Corrección de Habilidades Pasivas Infinitas (S1)
+- **Activación Permanente de Buffs Pasivos**: Se añadió el método `Skill::is_passive()` (`sp_type == "8"` o `"Passive"` con coste 0 y duración 0) para garantizar que los aumentos de estadísticas (como el +25% ATK y +25% DEF en la S1 de Eunectes *Tomahawk*) se apliquen de forma continua e incondicional tanto en estado base como en combate, resolviendo el bug donde se desactivaban cuando `is_skill_active` era falso.
+- **Puntuación de Eficiencia (100%)**: Las habilidades pasivas infinitas ahora reciben adecuadamente una puntuación de eficiencia del **100%** (anteriormente caían a `0.0` al no reconocer el tipo `"8"` en lugar de `"Passive"`, lo que provocaba que RAW superara injustamente a S1 en la ponderación de la Tier List).
+- **Eliminación de Multiplicadores Arbitrarios**: Se limpió la tasa de ataque de Eunectes en `simulation.rs`, retirando el factor arbitrario `atk * 1.15` y permitiendo que sus aumentos canónicos del blackboard modelen de forma precisa el daño físico.
+- **Sincronización en Simuladores y Editor**: Se integró `op.change_state()` en los endpoints `/api/simulate` y `/api/simulate_batch` para que el simulador interactivo evalúe los estados equipados en tiempo real con sus estadísticas completas.
+
+---
+
 ## [1.0.0] - Versión Inicial / Stable Core Release (2026-09-09)
 
 > [!WARNING]

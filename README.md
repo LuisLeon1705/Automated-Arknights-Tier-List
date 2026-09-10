@@ -110,7 +110,7 @@ This automatically produces detailed PDF ranking documents for every category an
 ---
 
 ## Versioning & Updates
-Current Version: **v1.0.0 (Stable Core Release)**  
+Current Version: **v1.0.1 (Stable Core Release)**  
 See [`CHANGELOG.md`](file:///C:/Users/leonp/OneDrive/Escritorio/TierList/CHANGELOG.md) for the complete version history, release notes, and known considerations for this initial release.
 
 "# Automated-Arknights-Tier-List" 
