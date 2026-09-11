@@ -75,8 +75,37 @@ impl SimulationEnvironment {
         let interval = op.final_interval().max(0.1);
         let attacks_per_sec = 1.0 / interval;
         let shots = op.hits_mult();
-        let dmg_mult = op.damage_multiplier();
+        let mut dmg_mult = op.damage_multiplier();
         let (heal_buff, heal_applies_to_allies) = op.heal_multiplier();
+
+        // On-trigger burst passives (sp_type 8 skills like "after deployment / when attacked /
+        // on switching stance, IMMEDIATELY deal X% ATK AoE damage") enter damage_multiplier as
+        // a permanent per-hit atk_scale. Convert them back to an expected value: the burst fires
+        // once per proc period (per enemy attack while hit-triggered, or once per 300s engagement
+        // for deploy-triggered), not on every single basic attack.
+        if let Some(s) = &op.equipped_skill {
+            if s.is_passive() {
+                let desc = &s.description;
+                let proc_period = if desc.contains("部署后") {
+                    Some(300.0)
+                } else if desc.contains("受到攻击") || desc.contains("切换") || desc.contains("立即对") {
+                    Some(self.target_stats.get("attack_interval").copied().unwrap_or(2.5).max(1.0))
+                } else {
+                    None
+                };
+                if let Some(period) = proc_period {
+                    let proc_scale = s.buffs.iter().chain(s.passive_buffs.iter())
+                        .filter(|b| b.stat.contains("atk_scale") && !b.stat.contains("damage_by") && !b.stat.contains("ep_damage"))
+                        .filter_map(|b| b.value.as_f64())
+                        .fold(0.0f64, f64::max);
+                    if proc_scale > 1.0 && dmg_mult >= proc_scale {
+                        let duty = (interval / period).clamp(0.02, 1.0);
+                        let expected = 1.0 + (proc_scale - 1.0) * duty;
+                        dmg_mult = dmg_mult / proc_scale * expected;
+                    }
+                }
+            }
+        }
 
         let mut r = StateRates {
             atk,
@@ -189,7 +218,9 @@ impl SimulationEnvironment {
             r.heal_from_arts = 0.50; // Converts 50% damage into healing
             if is_skill {
                 if let Some(s) = &op.equipped_skill {
-                    if s.name.contains("生命之火") || s.name.contains("Flame of Life") {
+                    // "Simultaneously attacks two enemies" (Reed S3): two-target mode
+                    if s.name.contains("生命之火") || s.name.contains("生命火种") || s.name.contains("Flame of Life")
+                        || (s.description.contains("同时攻击") && s.description.contains("两名")) {
                         r.target_limit = 2.0;
                     }
                 }
@@ -277,12 +308,13 @@ impl SimulationEnvironment {
                             // S2 (Overload):
                             // Mon3tr's peak team healing skill: heals Construct, which triggers a full chain sequence
                             // from the Construct to allies (2.57x) plus Talent 1 non-decay bounce (+0.73x) = 3.30x.
-                            // Talent 2 is multiplied by 2.8x (+61.6 ASPD), reducing interval to 2.85 / 1.616 = 1.764s.
+                            // Talent 2 ("战术协同") is scaled 2.8x by the skill's `talent_scale` blackboard,
+                            // which the engine applies automatically through the talent modifier pipeline,
+                            // shrinking the attack interval (2.85 / 1.616 ~= 1.76s) in `interval`.
                             let has_mod = op.active_module.is_some();
                             hm = if has_mod { 3.30 } else { 2.50 };
                             targets = 1.0;
-                            let s2_interval = 2.85 / 1.616;
-                            r.heal_per_sec = atk * hm / s2_interval;
+                            r.heal_per_sec = atk * hm / interval.max(0.1);
                             r.heal_targets = targets;
                             return r;
                         } else {
@@ -309,11 +341,11 @@ impl SimulationEnvironment {
                     let hot = 0.60;
                     if is_skill {
                         if let Some(s) = &op.equipped_skill {
-                            if s.name == "Volcanic Echoes" || s.description.contains("5- heal") || s.description.contains("5 heal") {
+                            if s.name == "Volcanic Echoes" || s.name.contains("火山回响") || s.description.contains("连发") {
                                 // S3: 5-heal sequence, 60% ATK each = 3.0x ATK + 5 targets HOT = 6.0x ATK
                                 hm = (0.60 + hot) * 5.0; // Global 5 targets
                                 targets = 1.0;
-                            } else if s.name == "Soundless Sustenance" || s.description.contains("one additional target") {
+                            } else if s.name == "Soundless Sustenance" || s.name.contains("无声润物") || s.description.contains("one additional target") || s.description.contains("额外治疗一名") {
                                 hm = (1.0 + hot) * 2.0;
                                 targets = 1.0;
                             } else {
@@ -331,6 +363,38 @@ impl SimulationEnvironment {
                 } else {
                     hm = 1.0;
                     targets = 1.0;
+                }
+                // Wandering medics (行医) restore HP/elemental damage across their range but
+                // NEVER attack enemies: no damage channel here (Hvít Aska stays DPS 0).
+            }
+
+            // Medics with attack-capable kits. Base physician/ring/chain attacks only heal,
+            // but when the equipped skill explicitly strikes enemies (summon commands like
+            // Kal'tsit's 指令：熔毁 binding Mon3tr, or direct-hit kits like Folinic's S2
+            // "弹片…对敌人造成…伤害" whose attack@atk_scale already merged into `dmg_mult`),
+            // credit the matching damage channel with the skill's stated damage type.
+            if is_skill {
+                if let Some(s) = &op.equipped_skill {
+                    let sd = s.description.as_str();
+                    let attacks = sd.contains("伤害类型变为") && sd.contains("真实")
+                        || sd.contains("可以攻击")
+                        || sd.contains("攻击阻挡的所有敌人")
+                        || (sd.contains("对敌人造成") && !sd.contains("无法对敌人") && !sd.contains("不会对敌人"));
+                    if attacks {
+                        let is_true = sd.contains("伤害类型变为") && sd.contains("真实")
+                            || sd.contains("造成真实伤害")
+                            || (sd.contains("对敌人造成") && sd.contains("真实伤害"));
+                        let is_phys = !is_true && (sd.contains("物理伤害")
+                            || sd.contains("攻击阻挡的所有敌人")
+                            || (sd.contains("对敌人造成") && !sd.contains("法术") && !sd.contains("元素")));
+                        if is_true {
+                            r.true_per_shot = atk * dmg_mult;
+                        } else if is_phys {
+                            r.phys_per_shot = atk * dmg_mult;
+                        } else {
+                            r.arts_per_shot = atk * dmg_mult;
+                        }
+                    }
                 }
             }
 
@@ -1351,6 +1415,26 @@ impl SimulationEnvironment {
         (t_base, t_skill, n_casts)
     }
 
+    /// Expected-value self-healing per second while the equipped skill is active, from
+    /// attack-leech kits whose description explicitly heals SELF ("治疗自身 / 恢复自身",
+    /// e.g. Mon3tr S3 Meltdown). Ally-targeted heal conversion (Incantation medics) is NOT
+    /// counted here: it keeps the team alive, not this operator soloing a boss.
+    fn self_heal_from_damage_rate(&self, skill_dps: f64) -> f64 {
+        self.primary_operator.equipped_skill.as_ref().map(|s| {
+            let d = &s.description;
+            if d.contains("治疗自身") || d.contains("恢复自身") {
+                let scale = s.buffs.iter().chain(s.passive_buffs.iter())
+                    .filter(|b| b.stat.contains("heal_scale"))
+                    .filter_map(|b| b.value.as_f64())
+                    .filter(|v| *v > 0.0 && *v <= 2.0)
+                    .fold(0.0f64, f64::max);
+                scale * skill_dps
+            } else {
+                0.0
+            }
+        }).unwrap_or(0.0)
+    }
+
     pub fn run_5_minute_sim(&mut self) -> (Vec<(f64, f64)>, Vec<(f64, f64)>, Vec<(f64, f64)>, Vec<(f64, f64)>, Vec<(f64, f64)>, HashMap<String, f64>) {
         let def = self.target_stats.get("def").copied().unwrap_or(0.0);
         let res = self.target_stats.get("res").copied().unwrap_or(0.0);
@@ -1383,7 +1467,7 @@ impl SimulationEnvironment {
         let arts_incoming = (mob_atk * 0.2 * res_mult) * dmg_resist;
         let incoming_dps = ((phys_incoming + arts_incoming) / mob_interval) * block;
 
-        let net_incoming_dps = (incoming_dps - self.primary_operator.hp_regen_per_second()).max(0.0);
+        let net_incoming_dps = (incoming_dps - self.primary_operator.hp_regen_per_second() - self.self_heal_from_damage_rate(sp + sa + st + se)).max(0.0);
         let op_pool = self.primary_operator.final_hp() + self.primary_operator.initial_barrier() + self.primary_operator.skill_barrier();
         let immortality = self.primary_operator.immortality_duration();
 
@@ -1526,7 +1610,17 @@ impl SimulationEnvironment {
         (dmg_curve, heal_curve, dp_curve, vec![(0.0, max_burst)], vec![(0.0, heal)], dmg_split)
     }
 
-    pub fn run_wave_sim(&mut self, enemy_hp: f64, enemy_def: f64, enemy_res: f64) -> f64 {
+    /// Wave Clearer simulation: 10 waves of 10 enemies (100 total) with 10s breaks.
+    /// Returns `(total_time, leaked_enemies)`.
+    ///
+    /// Leaking model (O(1), no discrete stepping):
+    /// - Each wave gives the operator a 15s window. Enemies still alive when the window
+    ///   closes leak past the operator toward the defense point (1% wave score penalty each,
+    ///   applied as a proportional time inflation on the returned TTC).
+    /// - A living melee operator whose field block covers the remaining mobs physically
+    ///   contains them, so nothing leaks while they keep dying to the operator's damage.
+    /// - An operator that dies mid-wave cannot hold the lane; blocked mobs escape.
+    pub fn run_wave_sim(&mut self, enemy_hp: f64, enemy_def: f64, enemy_res: f64) -> (f64, f64) {
         let ([bp, ba, bt, be, _bh, sp, sa, st, se, _sh], end_burst) = self.cycle_at(enemy_def, enemy_res);
 
         let has_skill = self.primary_operator.equipped_skill.is_some();
@@ -1540,54 +1634,89 @@ impl SimulationEnvironment {
         self.primary_operator.is_skill_active = has_skill;
         let s_limit = self.state_rates().target_limit.max(self.primary_operator.target_limit()).max(1.0);
         let s_hit_mult = s_limit.min(10.0);
+        let block_power = self.primary_operator.total_field_block();
         self.primary_operator.is_skill_active = false;
+
+        let is_ranged = self.primary_operator.get_position() != "MELEE";
 
         let b_dps = (bp + ba + bt + be) * b_hit_mult;
         let s_dps = (sp + sa + st + se) * s_hit_mult;
-
-        if b_dps <= 0.0 && s_dps <= 0.0 { return 1800.0; }
-
-        let (t_base, t_skill, n_casts) = self.get_cycle_times(300.0);
-        let mut avg_dps = ((b_dps * t_base) + (s_dps * t_skill)) / 300.0;
-        if end_burst > 0.0 { avg_dps += (end_burst * s_hit_mult) * n_casts / 300.0; }
-
-        if avg_dps <= 0.1 { return 1800.0; }
-
-        let wave_hp = enemy_hp * 10.0;
-        let time_to_kill = wave_hp / avg_dps;
 
         // Wave defeat check: incoming contact DPS from active blocked mobs
         let mob_atk = self.target_stats.get("atk").copied().unwrap_or(500.0).max(50.0);
         let mob_interval = self.target_stats.get("attack_interval").copied().unwrap_or(2.5).max(0.5);
         let block = self.primary_operator.target_limit().max(1.0).min(3.0);
         let mob_incoming_dps = (f64::max(0.05 * mob_atk, mob_atk - self.primary_operator.final_def()) / mob_interval) * block * (1.0 - self.primary_operator.damage_resistance());
-        let net_wave_incoming_dps = (mob_incoming_dps - self.primary_operator.hp_regen_per_second()).max(0.0);
+        let net_wave_incoming_dps = (mob_incoming_dps - self.primary_operator.hp_regen_per_second() - self.self_heal_from_damage_rate(s_dps)).max(0.0);
         let op_pool = self.primary_operator.final_hp() + self.primary_operator.initial_barrier() + self.primary_operator.skill_barrier();
         let immortality = self.primary_operator.immortality_duration();
 
+        if b_dps <= 0.0 && s_dps <= 0.0 {
+            // Cannot kill anything: the whole 100-enemy onslaught leaks unless a living
+            // melee operator can physically contain all 10 per-wave mobs at once.
+            let can_hold_all = !is_ranged && block_power >= 10.0;
+            return (1800.0, if can_hold_all { 0.0 } else { 100.0 });
+        }
+
+        let (t_base, t_skill, n_casts) = self.get_cycle_times(300.0);
+        let mut avg_dps = ((b_dps * t_base) + (s_dps * t_skill)) / 300.0;
+        if end_burst > 0.0 { avg_dps += (end_burst * s_hit_mult) * n_casts / 300.0; }
+
+        if avg_dps <= 0.1 {
+            return (1800.0, 100.0);
+        }
+
+        let wave_hp = enemy_hp * 10.0;
+        let time_to_kill = wave_hp / avg_dps;
+
         let mut wave_defeat_penalty = 0.0;
+        let mut is_defeated = false;
         if net_wave_incoming_dps > 0.0 {
             let survival_time = (op_pool / net_wave_incoming_dps) + immortality;
             if survival_time < time_to_kill {
+                is_defeated = true;
                 let deaths = (time_to_kill / survival_time.max(1.0)).floor();
                 wave_defeat_penalty = deaths * self.primary_operator.final_redeployment_time().max(30.0);
             }
         }
 
+        // ---- Leaking: 15s containment window per wave ----
+        let window = 15.0;
+        let leaked_per_wave = if time_to_kill <= window {
+            0.0
+        } else {
+            let killed_in_window = (window / time_to_kill * 10.0).min(10.0);
+            let remaining = 10.0 - killed_in_window;
+            let can_physically_hold = !is_ranged && !is_defeated && block_power >= remaining;
+            if can_physically_hold { 0.0 } else { remaining }
+        };
+        let total_leaks = (leaked_per_wave * 10.0).min(100.0);
+
         // 10 waves + 9 breaks of 10s + defeat penalty per wave
         let mut total_time = (time_to_kill * 10.0) + 90.0 + (wave_defeat_penalty * 10.0);
 
-        // 1-block melee penalty: Cannot contain swarms/pairs of weight >= 2 mobs, leaking enemies
-        if self.primary_operator.get_position() == "MELEE" && self.primary_operator.total_field_block() < 2.0 {
-            total_time += 150.0;
-        }
+        // Each leaked enemy (out of the 100-enemy onslaught) penalizes 1% of the wave score
+        total_time *= 1.0 + total_leaks / 100.0;
 
-        total_time.min(1800.0)
+        (total_time.min(1800.0), total_leaks)
     }
 
-    pub fn run_boss_sim(&mut self, boss_hp: f64, boss_def: f64, boss_res: f64) -> f64 {
+    /// Boss Killer simulation: 2 phases with a 15s revive cooldown between them.
+    /// Returns `(total_time, leak_ratio)` where `leak_ratio` is the fraction of the
+    /// boss's HP that passes the operator before dying (0.0 = perfect containment).
+    ///
+    /// Leaking model:
+    /// - A phase must be defeated within a 30s travel window; anything beyond leaks
+    ///   proportionally (`1 - window / phase_time`).
+    /// - Living melee operators physically hold the boss, extending the containment
+    ///   window by 15s per block point (up to 3 blocks => 75s max window).
+    /// - Operators defeated mid-phase cannot redeploy inside the travel window
+    ///   (70s redeploy > 30s window), so the boss fully leaks.
+    /// - Executors with fast redeploy leak the boss while off-field between deployments.
+    pub fn run_boss_sim(&mut self, boss_hp: f64, boss_def: f64, boss_res: f64) -> (f64, f64) {
         let ([bp, ba, bt, be, _bh, sp, sa, st, se, _sh], end_burst) = self.cycle_at(boss_def, boss_res);
 
+        let has_skill_boss = self.primary_operator.equipped_skill.is_some();
         let e_interval = self.target_stats.get("attack_interval").copied().unwrap_or(3.0).max(0.5);
         let boss_atk = self.target_stats.get("atk").copied().unwrap_or(1200.0).max(100.0);
 
@@ -1615,7 +1744,7 @@ impl SimulationEnvironment {
             self.primary_operator.is_skill_active = false;
         }
 
-        if b_dps <= 0.0 && s_dps <= 0.0 { return 1800.0; }
+        if b_dps <= 0.0 && s_dps <= 0.0 { return (1800.0, 1.0); }
 
         // Against boss: skill starts active at engagement IF operator can block or is not a duelist blocked by weight
         let is_duelist = self.primary_operator.is_duelist();
@@ -1630,7 +1759,7 @@ impl SimulationEnvironment {
         let mut avg_dps = ((b_dps * t_base) + (s_dps * t_skill)) / 300.0;
         if end_burst > 0.0 { avg_dps += end_burst * n_casts / 300.0; }
 
-        if avg_dps <= 0.1 { return 1800.0; }
+        if avg_dps <= 0.1 { return (1800.0, 1.0); }
 
         let mut phase_time = boss_hp / avg_dps;
 
@@ -1651,11 +1780,12 @@ impl SimulationEnvironment {
         let boss_dmg_per_hit = f64::max(0.05 * boss_atk, boss_atk - self.primary_operator.final_def());
         let boss_incoming_dps = (boss_dmg_per_hit / e_interval) * (1.0 - self.primary_operator.damage_resistance());
         let op_regen = self.primary_operator.hp_regen_per_second();
-        let net_incoming_dps = (boss_incoming_dps - op_regen).max(0.0);
+        let net_incoming_dps = (boss_incoming_dps - op_regen - self.self_heal_from_damage_rate(s_dps)).max(0.0);
         let op_pool = self.primary_operator.final_hp() + self.primary_operator.initial_barrier() + self.primary_operator.skill_barrier();
         let immortality = self.primary_operator.immortality_duration();
 
         let mut defeat_penalty_time = 0.0;
+        let mut is_defeated = false;
 
         // Laios S1 cowers for 15 seconds when facing a Leader/Boss
         if self.primary_operator.name == "Laios" || self.primary_operator.is_char("char_4142_laios") || self.primary_operator.name.contains("莱欧斯") {
@@ -1677,14 +1807,46 @@ impl SimulationEnvironment {
         if net_incoming_dps > 0.0 {
             let survival_time = (op_pool / net_incoming_dps) + immortality;
             if survival_time < phase_time {
+                is_defeated = true;
                 let deaths_per_phase = (phase_time / survival_time.max(1.0)).floor();
                 let redeploy_time = self.primary_operator.final_redeployment_time().max(30.0);
                 defeat_penalty_time = deaths_per_phase * redeploy_time * 2.0; // 2 phases
             }
         }
 
-        // 2 phases + 15s revive + defeat penalty
-        let total_time = (phase_time * 2.0) + 15.0 + defeat_penalty_time;
-        total_time.min(1800.0)
+        // ---- Leaking: the boss must die inside its travel window or it reaches the blue box ----
+        let is_ranged = self.primary_operator.get_position() != "MELEE";
+        self.primary_operator.is_skill_active = has_skill_boss;
+        let field_block = self.primary_operator.total_field_block();
+        self.primary_operator.is_skill_active = false;
+
+        // Living melee operators physically hold the boss, extending the containment
+        // window by 15s per block point (capped at 3 blocks => 75s effective window)
+        let travel_window = 30.0;
+        let hold_window = if !is_ranged && field_block >= 1.0 {
+            travel_window + 15.0 * field_block.min(3.0)
+        } else {
+            travel_window
+        };
+
+        let mut boss_leak_ratio = if is_defeated {
+            // Dead operators cannot hold the lane; redeploy downtime always exceeds the window
+            1.0
+        } else if phase_time > hold_window {
+            (1.0 - hold_window / phase_time).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
+        // Fast-redeploy Executors leak the boss during their off-field redeployment gaps
+        if self.primary_operator.is_executor() && phase_time > t_skill {
+            let off_field_ratio = (t_base / 300.0).clamp(0.0, 1.0);
+            boss_leak_ratio = f64::max(boss_leak_ratio, off_field_ratio);
+        }
+        boss_leak_ratio = boss_leak_ratio.clamp(0.0, 1.0);
+
+        // 2 phases + 15s revive + defeat penalty, inflated proportionally by the leak penalty
+        let total_time = ((phase_time * 2.0) + 15.0 + defeat_penalty_time) * (1.0 + boss_leak_ratio);
+        (total_time.min(1800.0), boss_leak_ratio)
     }
 }

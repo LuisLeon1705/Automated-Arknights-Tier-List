@@ -23,7 +23,9 @@ fn remove_brackets(s: &str) -> String {
 /// Returns (new_stat, new_value, optional_explicit_buff_type).
 /// `item_kind` is "talent", "skill" or "module" (negative atk/def on talents/modules
 /// are enemy debuffs, while negative values on skills are usually self trade-offs).
-fn normalize_buff(raw: &str, val: f64, item_kind: &str) -> (String, f64, Option<String>) {
+/// `desc` is the source item's description, used to disambiguate the `prob` key
+/// (trigger chance for crit/proc effects vs physical/arts dodge chance).
+fn normalize_buff(raw: &str, val: f64, item_kind: &str, desc: &str) -> (String, f64, Option<String>) {
     let after_at = raw.rsplit('@').next().unwrap_or(raw);
     let has_dot = after_at.contains('.');
     let suffix0 = after_at.rsplit('.').next().unwrap_or(after_at);
@@ -83,7 +85,11 @@ fn normalize_buff(raw: &str, val: f64, item_kind: &str) -> (String, f64, Option<
         "talent_scale" => ("talent_multiplier".into(), val, Some("multiplier".into())),
         "ep_heal_ratio" => ("elemental_healing_per_second_atk_ratio".into(), val, Some("ratio".into())),
         "ep_damage_resistance" => ("ep_damage_resistance".into(), val, Some("ratio".into())),
-        "prob" => ("arts_dodge".into(), val, Some("ratio".into())),
+        // "prob" is ambiguous in the raw blackboard: with dodge/block wording in the source
+        // description it is a physical/arts dodge chance; otherwise it is the trigger
+        // probability of a crit/proc effect (consumed by damage_multiplier).
+        "prob" if desc.contains("闪避") || desc.contains("抵挡") || desc.contains("格挡") => ("arts_dodge".into(), val, Some("ratio".into())),
+        "prob" => ("prob".into(), val, Some("ratio".into())),
         "magic_resistance" if val > 0.0 => {
             if val <= 2.0 { ("res".into(), val, Some("ratio".into())) }
             else { ("res".into(), val, Some("flat".into())) }
@@ -261,12 +267,74 @@ impl DataLoader {
         op
     }
 
+    /// Infers which talent a `talent_scale`/`talent_addition` buff targets by parsing
+    /// the CN description ("第一天赋", "第二天赋", ...). Falls back to the first talent
+    /// that has buffs when the text mentions "天赋" without an explicit index.
+    fn infer_target_talent(desc: &str, talent_names: &[String], talent_has_buffs: &[bool]) -> Option<String> {
+        let explicit = if desc.contains("第一天赋") || desc.contains("天赋一") || desc.contains("天赋①") {
+            Some(0)
+        } else if desc.contains("第二天赋") || desc.contains("天赋二") || desc.contains("天赋②") {
+            Some(1)
+        } else if desc.contains("第三天赋") || desc.contains("天赋三") || desc.contains("天赋③") {
+            Some(2)
+        } else {
+            None
+        };
+        if let Some(i) = explicit {
+            return talent_names.get(i).cloned().filter(|n| !n.is_empty());
+        }
+        if !desc.contains("天赋") {
+            return None;
+        }
+        for (i, hb) in talent_has_buffs.iter().enumerate() {
+            if *hb {
+                return talent_names.get(i).cloned().filter(|n| !n.is_empty());
+            }
+        }
+        None
+    }
+
+    fn link_talent_modifiers(op: &mut Operator) {
+        let talent_names: Vec<String> = op.talents.iter().map(|t| t.name.clone()).collect();
+        let talent_has_buffs: Vec<bool> = op.talents.iter()
+            .map(|t| !t.buffs.is_empty() && !t.name.contains("Potential"))
+            .collect();
+
+        for s in &mut op.skills {
+            let desc = s.description.clone();
+            let needs = s.buffs.iter().chain(s.passive_buffs.iter())
+                .any(|b| (b.stat == "talent_multiplier" || b.stat == "talent_addition") && b.target_talent.is_none());
+            if needs {
+                if let Some(name) = Self::infer_target_talent(&desc, &talent_names, &talent_has_buffs) {
+                    for b in s.buffs.iter_mut().chain(s.passive_buffs.iter_mut()) {
+                        if (b.stat == "talent_multiplier" || b.stat == "talent_addition") && b.target_talent.is_none() {
+                            b.target_talent = Some(name.clone());
+                        }
+                    }
+                }
+            }
+        }
+        for m in &mut op.modules {
+            let needs = m.buffs.iter()
+                .any(|b| (b.stat == "talent_multiplier" || b.stat == "talent_addition") && b.target_talent.is_none());
+            if needs {
+                if let Some(name) = Self::infer_target_talent(&m.name, &talent_names, &talent_has_buffs) {
+                    for b in m.buffs.iter_mut() {
+                        if (b.stat == "talent_multiplier" || b.stat == "talent_addition") && b.target_talent.is_none() {
+                            b.target_talent = Some(name.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Rewrites raw blackboard buff keys into the engine's semantic stat names.
     fn normalize_operator(op: &mut Operator) {
-        fn apply_norm(b: &mut Buff, kind: &str) {
+        fn apply_norm(b: &mut Buff, kind: &str, desc: &str) {
             let raw = b.stat.clone();
             let val = b.value.as_f64().unwrap_or(0.0);
-            let (ns, nv, nt) = normalize_buff(&raw, val, kind);
+            let (ns, nv, nt) = normalize_buff(&raw, val, kind, desc);
             b.stat = ns;
             if let Some(t) = nt { b.buff_type = t; }
             if b.value.as_f64().is_some() { b.value = serde_json::json!(nv); }
@@ -299,22 +367,25 @@ impl DataLoader {
             }
         }
         for t in &mut op.talents {
-            for b in &mut t.buffs { apply_norm(b, "talent"); }
+            let d = t.description.clone();
+            for b in &mut t.buffs { apply_norm(b, "talent", &d); }
             synth_pp(&mut t.buffs);
         }
         for s in &mut op.skills {
-            for b in &mut s.buffs { apply_norm(b, "skill"); }
-            for b in &mut s.passive_buffs { apply_norm(b, "skill"); }
-            for b in &mut s.overdrive_buffs { apply_norm(b, "skill"); }
+            let d = s.description.clone();
+            for b in &mut s.buffs { apply_norm(b, "skill", &d); }
+            for b in &mut s.passive_buffs { apply_norm(b, "skill", &d); }
+            for b in &mut s.overdrive_buffs { apply_norm(b, "skill", &d); }
             synth_pp(&mut s.buffs);
         }
         for m in &mut op.modules {
-            for b in &mut m.buffs { apply_norm(b, "module"); }
+            for b in &mut m.buffs { apply_norm(b, "module", ""); }
             synth_pp(&mut m.buffs);
         }
         for s in &mut op.summons {
             Self::normalize_operator(s);
         }
+        Self::link_talent_modifiers(op);
     }
 
     pub fn save_operators(&self) -> Result<(), Box<dyn std::error::Error>> {

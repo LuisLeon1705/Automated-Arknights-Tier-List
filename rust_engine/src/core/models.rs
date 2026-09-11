@@ -1039,36 +1039,78 @@ impl Operator {
     /// Values are TOTAL multipliers (e.g. 1.45 = 145% ATK per shot). Buffs are grouped by
     /// source item name; within a group the max scale wins, and a co-existing `prob`
     /// (trigger chance) turns it into an expected value: 1 + p*(s-1). Groups multiply.
+    /// Module scale/prob buffs merge into the talent group they upgrade (X/Y modules
+    /// replace the base talent values instead of stacking as a separate group), and
+    /// `ep_damage_scale` (one-shot elemental fallout bursts) is never a per-hit scale.
     pub fn damage_multiplier(&self) -> f64 {
         let buffs = self.get_active_buffs();
         let is_dollkeeper = self.sub_profession_id == "dollkeeper" || self.subclass_name.contains("傀儡师");
-        let mut groups: HashMap<String, (f64, f64)> = HashMap::new(); // name -> (max_scale, prob)
+
+        let module_name = self.active_module.as_ref().map(|m| m.name.clone()).unwrap_or_default();
+        let mut module_group: Option<String> = None;
+        if let Some(m) = &self.active_module {
+            let mod_has_proc = m.buffs.iter().any(|b| {
+                (b.stat.contains("atk_scale") && !b.stat.contains("damage_by_atk_scale") && !b.stat.contains("ep_damage_scale"))
+                    || b.stat.contains("damage_scale")
+                    || b.stat.contains("magic_scale")
+                    || b.stat == "prob"
+            });
+            if mod_has_proc {
+                module_group = self.talents.iter()
+                    .filter(|t| !t.name.contains("Potential"))
+                    .find(|t| {
+                        t.buffs.iter().any(|tb| {
+                            ((tb.stat.contains("atk_scale") && !tb.stat.contains("damage_by_atk_scale") && !tb.stat.contains("ep_damage_scale"))
+                                || tb.stat.contains("damage_scale")
+                                || tb.stat.contains("magic_scale"))
+                                && m.buffs.iter().any(|mb| mb.stat == tb.stat)
+                        })
+                    })
+                    .map(|t| t.name.clone());
+            }
+        }
+
+        let mut groups: HashMap<String, (f64, f64, bool)> = HashMap::new(); // name -> (max_scale, prob, prob_set)
         for b in &buffs {
             // For Dollkeepers, damage_scale in talents/modules is substitute spawn burst on death, not basic attack scale
             if is_dollkeeper && b.stat.contains("damage_scale") && !self.is_skill_active {
                 continue;
             }
+            // Elemental fallout / end-of-effect bursts are one-shot scales, never per-hit multipliers
+            if b.stat.contains("ep_damage_scale") || b.stat.contains("damage_by_atk_scale") {
+                continue;
+            }
             let is_scale = (b.stat.contains("atk_scale") && !b.stat.contains("damage_by_atk_scale"))
                 || b.stat.contains("damage_scale")
-                || b.stat.contains("magic_scale")
-                || b.stat.contains("ep_damage_scale");
+                || b.stat.contains("magic_scale");
+            let key = if !module_name.is_empty() && b.name == module_name {
+                module_group.clone().unwrap_or_else(|| b.name.clone())
+            } else {
+                b.name.clone()
+            };
             if is_scale {
                 let mut v = b.value.as_f64().unwrap_or(1.0);
-                if (b.stat.contains("damage_scale") || b.stat.contains("magic_scale") || b.stat.contains("ep_damage_scale")) && v < 1.0 && v > 0.0 {
+                if (b.stat.contains("damage_scale") || b.stat.contains("magic_scale")) && v < 1.0 && v > 0.0 {
                     v = 1.0 + v;
                 }
-                let e = groups.entry(b.name.clone()).or_insert((0.0, 1.0));
+                // atk_scale <= 1.0 is not a per-hit damage scale: it is the coefficient of a
+                // one-shot burst (e.g. Nearl's deploy true-damage proc). Never debuff basic attacks.
+                if b.stat.contains("atk_scale") && !b.stat.contains("damage_scale") && v <= 1.0 {
+                    continue;
+                }
+                let e = groups.entry(key).or_insert((0.0, 1.0, false));
                 if v > e.0 { e.0 = v; }
             } else if b.stat == "prob" {
                 let v = b.value.as_f64().unwrap_or(1.0);
                 if v > 0.0 && v < 1.0 {
-                    let e = groups.entry(b.name.clone()).or_insert((0.0, 1.0));
-                    if v < e.1 { e.1 = v; }
+                    let e = groups.entry(key).or_insert((0.0, 1.0, false));
+                    // The highest stated proc rate wins: modules upgrade (not downgrade) the talent chance
+                    if !e.2 || v > e.1 { e.1 = v; e.2 = true; }
                 }
             }
         }
         let mut m = 1.0;
-        for (_n, (s, p)) in groups {
+        for (_n, (s, p, _ps)) in groups {
             if s <= 0.0 { continue; }
             let contrib = 1.0 + p * (s - 1.0);
             if contrib > 0.0 { m *= contrib; }
@@ -1371,15 +1413,19 @@ impl Operator {
         let is_chain = sub == "chain" || sub == "chainhealer" || sub_cn.contains("链");
 
         let mut is_skill_aoe = false;
+        let mut hits_all_blocked = false;
         if self.is_skill_active {
             if let Some(skill) = &self.equipped_skill {
                 let desc = &skill.description;
                 let s_name = &skill.name;
+                // "Attacks all BLOCKED enemies" (e.g. Mountain S2) is block-count AoE,
+                // not an uncapped AoE: the target cap is the operator's block count
+                hits_all_blocked = desc.contains("阻挡的所有敌人");
                 if skill.is_true_aoe 
                     || desc.contains("群体攻击") 
                     || desc.contains("变为群体") 
-                    || desc.contains("所有敌人") 
-                    || desc.contains("所有敌方单位") 
+                    || (desc.contains("所有敌人") && !hits_all_blocked) 
+                    || (desc.contains("所有敌方单位") && !hits_all_blocked) 
                     || desc.contains("对附近所有") 
                     || desc.contains("对周围所有") 
                     || desc.contains("溅射") 
@@ -1402,6 +1448,8 @@ impl Operator {
 
         let base = if is_base_aoe || is_skill_aoe {
             5.0
+        } else if hits_all_blocked {
+            self.calculate_stat("block_count").max(1.0)
         } else if is_centurion {
             let block = self.base_stats.get("block_count").and_then(|v| v.as_f64()).unwrap_or(3.0);
             (block + self.calculate_stat("block_count")).max(3.0)

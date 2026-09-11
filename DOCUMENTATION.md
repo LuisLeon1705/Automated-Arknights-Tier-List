@@ -277,7 +277,7 @@ All endpoints are hosted by default on `http://127.0.0.1:8000` (configurable via
 |---|---|---|
 | [`ejecutar_programa.bat`] | Windows batch script that builds the Rust engine in `--release` mode and launches the web server on `http://127.0.0.1:8000`. | Windows CMD, Cargo |
 | [`README.md`] | Project presentation document providing feature overviews, architecture highlights, quick-start guides, and explicit attribution to **[myrtle.moe](https://myrtle.moe)**. | Markdown |
-| [`CHANGELOG.md`]| Official version history, patch notes, and release considerations for v1.0.1. | Markdown |
+| [`CHANGELOG.md`]| Official version history, patch notes, and release considerations for v1.0.2. | Markdown |
 | [`GEMINI.md`] | Master AI context guide and system specification detailing directories, rules, and core mathematical principles. | Markdown |
 | [`DOCUMENTATION.md`] | Exhaustive technical documentation and API reference manual. | Markdown |
 | [`.gitignore`] | Git exclusion patterns covering Rust target builds, Python caches, temporary logs, `.zip` archives, and `myrtle-main/`. | Git |

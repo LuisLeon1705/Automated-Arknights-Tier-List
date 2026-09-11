@@ -76,14 +76,14 @@ fn main() {
 
             let mut boss_sim = core::simulation::SimulationEnvironment::new(op.clone(), None, Some(target_stats.clone()));
             // Standard boss benchmark: 100k HP, 1000 DEF, 50 RES
-            let boss_ttc = boss_sim.run_boss_sim(100_000.0, 1000.0, 50.0);
+            let (boss_ttc, boss_leak) = boss_sim.run_boss_sim(100_000.0, 1000.0, 50.0);
 
             println!("\n  Skill: {}", sk_name);
             println!("    Initial Barrier: {:.1} HP, Skill Barrier: {:.1} HP (Max Cap: {:.1} HP)", init_bar, skill_bar, cap);
             println!("    Thorns Ratio: {:.2}%, EHP Phys: {:.0}, EHP Arts: {:.0}", thorns * 100.0, ehp_phys, ehp_arts);
             println!("    5-min Total DMG: {:.0} (DPS: {:.1})", total_dmg, total_dmg / 300.0);
             println!("    DMG Split: Phys={:.0}, Arts={:.0} (Reflected Thorns Arts={:.0})", phys_dmg, arts_dmg, reflect_arts);
-            println!("    Boss (100k HP, 1000 DEF, 50 RES) Time-to-Kill: {:.1}s", boss_ttc);
+            println!("    Boss (100k HP, 1000 DEF, 50 RES) Time-to-Kill: {:.1}s (Leak: {:.1}%)", boss_ttc, boss_leak * 100.0);
         }
     }
 

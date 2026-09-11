@@ -1,6 +1,6 @@
 # Arknights Analytical Tier List Engine
 
-An empirical, mathematical combat simulator and analytical tier list engine for the mobile game *Arknights*. The project replaces subjective community rankings with deterministic, objective combat simulations over 300-second (5-minute) standard battle encounters. (Up to date to 09/09/2026)
+An empirical, mathematical combat simulator and analytical tier list engine for the mobile game *Arknights*. The project replaces subjective community rankings with deterministic, objective combat simulations over 300-second (5-minute) standard battle encounters. (Up to date to November 11 2026 Global)
 
 ---
 
@@ -110,7 +110,7 @@ This automatically produces detailed PDF ranking documents for every category an
 ---
 
 ## Versioning & Updates
-Current Version: **v1.0.1 (Stable Core Release)**  
+Current Version: **v1.0.2 (Stable Core Release)**  
 See [`CHANGELOG.md`](file:///C:/Users/leonp/OneDrive/Escritorio/TierList/CHANGELOG.md) for the complete version history, release notes, and known considerations for this initial release.
 
 "# Automated-Arknights-Tier-List" 

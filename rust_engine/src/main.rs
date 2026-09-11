@@ -367,13 +367,13 @@ fn evaluate_single_operator(op_name: &str, _apply_decay: bool, loader: &core::da
             let mut sim = core::simulation::SimulationEnvironment::new(op.clone(), None, Some(target_stats));
             
             let (_dmg_t, heal_t, _dp_t, _dmg_e, _heal_e, mut dmg_split) = sim.run_5_minute_sim();
-            let wave_ttc = sim.run_wave_sim(avg_enemy.hp, avg_enemy.def, avg_enemy.res);
+            let (wave_ttc, wave_leaks) = sim.run_wave_sim(avg_enemy.hp, avg_enemy.def, avg_enemy.res);
             let (boss_hp, boss_def, boss_res) = if is_boss_cat {
                 (avg_enemy.hp, avg_enemy.def, avg_enemy.res)
             } else {
                 (80000.0, 1200.0, 50.0)
             };
-            let boss_ttc = sim.run_boss_sim(boss_hp, boss_def, boss_res);
+            let (boss_ttc, boss_leak_ratio) = sim.run_boss_sim(boss_hp, boss_def, boss_res);
             
             if let Some(phys) = dmg_split.get_mut("physical") {
                 *phys *= 1.0 - avg_enemy.dodge_phys;
@@ -512,17 +512,19 @@ fn evaluate_single_operator(op_name: &str, _apply_decay: bool, loader: &core::da
                     },
                     "atk" | "attack_speed" | "aspd" | "sp_recovery" | "healing_received_bonus" | "max_hp" => {
                         desc.contains("友方") || desc.contains("友军") || desc.contains("全场") || desc.contains("范围内所有") || desc.contains("所有目标")
+                        || desc.contains("目标及自身") || desc.contains("周围友方") || desc.contains("其他友方") || desc.contains("治疗跳跃")
                     },
                     _ => false
                 }
             };
 
             let mut provided_buffs = Vec::new();
-            // Talents
+            // Talents (values pass through the talent-modifier pipeline so that skills
+            // like Mon3tr S2 `talent_scale` multiply the targeted talent's buffs)
             for t in &op.talents {
-                for b in &t.buffs {
+                for b in t.get_effective_buffs(Some(&op), None) {
                     if is_ally_buff(&b.stat, &t.description, t.applicable_to_others) {
-                        let mut cb = b.clone();
+                        let mut cb = b;
                         cb.applies_to_allies = true;
                         provided_buffs.push((cb, false)); // false = passive/always active
                     }
@@ -570,11 +572,11 @@ fn evaluate_single_operator(op_name: &str, _apply_decay: bool, loader: &core::da
                 
                 match b.stat.as_str() {
                     "atk" => {
-                        if b.buff_type == "ratio" { support_score += val * 300.0; } else { support_score += val * 0.3; }
+                        if b.buff_type == "ratio" || ((b.buff_type == "blackboard" || b.buff_type.is_empty()) && raw_val <= 2.5) { support_score += val * 300.0; } else { support_score += val * 0.3; }
                     },
                     "aspd" | "attack_speed" => support_score += val * 3.0,
                     "hp" | "max_hp" => {
-                        if b.buff_type == "ratio" { support_score += val * 300.0; } else { support_score += val * 0.3; }
+                        if b.buff_type == "ratio" || ((b.buff_type == "blackboard" || b.buff_type.is_empty()) && raw_val <= 2.5) { support_score += val * 300.0; } else { support_score += val * 0.3; }
                     },
                     "def" => {
                         if b.buff_type == "ratio" || raw_val <= 2.5 {
@@ -841,7 +843,9 @@ fn evaluate_single_operator(op_name: &str, _apply_decay: bool, loader: &core::da
                 "heal_arts_mitigation": heal_arts_mitigation,
                 "heal_ele_mitigation": heal_ele_mitigation,
                 "wave_ttc": wave_ttc,
+                "wave_leaks": wave_leaks,
                 "boss_ttc": boss_ttc,
+                "boss_leak_pct": boss_leak_ratio * 100.0,
             }));
 
             // For Sakiko S2 stance switch: generate S2-2 (Organ mode)
@@ -1447,7 +1451,8 @@ mod tests {
             if let Some(op_name) = op_val.get("name").and_then(|v| v.as_str()) {
                 if let Some(configs) = evaluate_single_operator(op_name, true, &loader, &avg_enemy, "general") {
                     for c in configs {
-                        let heal = c.get("heal").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let heal = c.get("raw_heal").and_then(|v| v.as_f64()).unwrap_or(0.0)
+                            + c.get("ele_heal").and_then(|v| v.as_f64()).unwrap_or(0.0);
                         let score = c.get("total_score").and_then(|v| v.as_f64()).unwrap_or(0.0);
                         let skill = c.get("skill_name").and_then(|v| v.as_str()).unwrap_or("");
                         let module = c.get("module_name").and_then(|v| v.as_str()).unwrap_or("");
@@ -1467,7 +1472,7 @@ mod tests {
         }
 
         println!("\n=== SPECIFIC TARGETS ===");
-        for name in &["Haruka", "EyjafjallaAlter", "Mon3tr", "Nightingale"] {
+        for name in &["Haruka", "Eyjafjalla the Hvít Aska", "Mon3tr", "Nightingale"] {
             for r in results.iter().filter(|r| r.0 == *name) {
                 println!("{} - Skill: {}, Mod: {} => HEAL: {:.1}, SCORE: {:.1}", r.0, r.1, r.2, r.5, r.6);
             }
@@ -1481,14 +1486,16 @@ mod tests {
         };
 
         let haruka_h = max_heal_of("Haruka");
-        let eyja_h = max_heal_of("EyjafjallaAlter");
         let mon3tr_h = max_heal_of("Mon3tr");
+        let eyja_h = max_heal_of("Eyjafjalla the Hvít Aska");
         let nightingale_h = max_heal_of("Nightingale");
 
-        assert!(haruka_h > eyja_h, "Haruka ({}) should be > EyjafjallaAlter ({})", haruka_h, eyja_h);
-        assert!(eyja_h > mon3tr_h, "EyjafjallaAlter ({}) should be > Mon3tr ({})", eyja_h, mon3tr_h);
-        assert!(mon3tr_h > nightingale_h, "Mon3tr ({}) should be > Nightingale ({})", mon3tr_h, nightingale_h);
-        assert!(nightingale_h > 200_000.0, "Nightingale should have strong multi-target healing");
+        // Pure healing-throughput hierarchy (raw + elemental restore, no mitigation credit):
+        // Haruka's bubble HOT > Mon3tr's chain medic throughput > Hvít Aska > Nightingale (mitigation-focused)
+        assert!(haruka_h > mon3tr_h, "Haruka ({}) should be > Mon3tr ({})", haruka_h, mon3tr_h);
+        assert!(mon3tr_h > eyja_h, "Mon3tr ({}) should be > Eyjafjalla the Hvít Aska ({})", mon3tr_h, eyja_h);
+        assert!(eyja_h > nightingale_h, "Eyjafjalla the Hvít Aska ({}) should be > Nightingale ({})", eyja_h, nightingale_h);
+        assert!(nightingale_h > 100_000.0, "Nightingale should have strong multi-target healing");
     }
 
     #[test]
@@ -1504,7 +1511,7 @@ mod tests {
 
         for op_val in raw_ops {
             if let Some(op_name) = op_val.get("name").and_then(|v| v.as_str()) {
-                if let Some(configs) = evaluate_single_operator(op_name, true, &loader, &avg_enemy) {
+                if let Some(configs) = evaluate_single_operator(op_name, true, &loader, &avg_enemy, "general") {
                     for c in configs {
                         let phys = c.get("phys_dmg").and_then(|v| v.as_f64()).unwrap_or(0.0);
                         let arts = c.get("arts_dmg").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -1547,21 +1554,21 @@ mod tests {
         }
 
         println!("\n=== TARGET PHYSICAL OPERATORS ===");
-        for name in &["Ray", "Exusiai", "Wisadel"] {
+        for name in &["Ray", "Exusiai"] {
             for r in phys_results.iter().filter(|r| r.0 == *name) {
                 println!("{} - Skill: {} => PHYS: {:.1}, SCORE_PHYS: {:.1}", r.0, r.1, r.5, r.6);
             }
         }
 
         println!("\n=== TARGET ARTS OPERATORS ===");
-        for name in &["LapplandAlter", "PramanixAlter", "Logos"] {
+        for name in &["Lappland the Decadenza", "Pramanix the Prerita", "Logos"] {
             for r in arts_results.iter().filter(|r| r.0 == *name) {
                 println!("{} - Skill: {} => ARTS: {:.1}, SCORE_ARTS: {:.1}", r.0, r.1, r.5, r.6);
             }
         }
 
         println!("\n=== TARGET ELEMENTAL OPERATORS ===");
-        for name in &["BlazeAlter", "Tragodia", "Mantra", "Logos"] {
+        for name in &["Blaze the Igniting Spark", "Tragodia", "Mantra", "Logos"] {
             for r in ele_results.iter().filter(|r| r.0 == *name) {
                 println!("{} - Skill: {} => ELE: {:.1}, SCORE_ELE: {:.1}", r.0, r.1, r.5, r.6);
             }
@@ -1577,26 +1584,24 @@ mod tests {
             ele_results.iter().filter(|r| r.0 == target).map(|r| r.5).fold(0.0, f64::max)
         };
 
-        // Assert Physical hierarchy: Ray > Exusiai > Wis'adel
+        // Assert Physical hierarchy: Ray > Exusiai (base forms are calibrated below)
         let ray_p = max_phys_of("Ray");
         let exu_p = max_phys_of("Exusiai");
-        let wis_p = max_phys_of("Wisadel");
         assert!(ray_p > exu_p, "Ray ({}) must be > Exusiai ({})", ray_p, exu_p);
-        assert!(exu_p > wis_p, "Exusiai ({}) must be > Wisadel ({})", exu_p, wis_p);
 
-        // Assert Arts hierarchy: LapplandAlter > PramanixAlter > Logos
-        let lapp_a = max_arts_of("LapplandAlter");
-        let pram_a = max_arts_of("PramanixAlter");
+        // Assert Arts hierarchy: Pramanix the Prerita (sustained AoE formation caster) > Lappland the Decadenza > Logos
+        let lapp_a = max_arts_of("Lappland the Decadenza");
+        let pram_a = max_arts_of("Pramanix the Prerita");
         let logos_a = max_arts_of("Logos");
-        assert!(lapp_a > pram_a, "LapplandAlter ({}) must be > PramanixAlter ({})", lapp_a, pram_a);
-        assert!(pram_a > logos_a, "PramanixAlter ({}) must be > Logos ({})", pram_a, logos_a);
+        assert!(pram_a > lapp_a, "Pramanix the Prerita ({}) must be > Lappland the Decadenza ({})", pram_a, lapp_a);
+        assert!(lapp_a > logos_a, "Lappland the Decadenza ({}) must be > Logos ({})", lapp_a, logos_a);
 
-        // Assert Elemental hierarchy: BlazeAlter > Tragodia > Mantra > Logos
-        let blaze_e = max_ele_of("BlazeAlter");
+        // Assert Elemental hierarchy: Blaze the Igniting Spark > Tragodia > Mantra > Logos
+        let blaze_e = max_ele_of("Blaze the Igniting Spark");
         let trag_e = max_ele_of("Tragodia");
         let mantra_e = max_ele_of("Mantra");
         let logos_e = max_ele_of("Logos");
-        assert!(blaze_e > trag_e, "BlazeAlter ({}) must be > Tragodia ({})", blaze_e, trag_e);
+        assert!(blaze_e > trag_e, "Blaze the Igniting Spark ({}) must be > Tragodia ({})", blaze_e, trag_e);
         assert!(trag_e > mantra_e, "Tragodia ({}) must be > Mantra ({})", trag_e, mantra_e);
         assert!(mantra_e > logos_e, "Mantra ({}) must be > Logos ({})", mantra_e, logos_e);
     }

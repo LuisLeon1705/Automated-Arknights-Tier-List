@@ -509,8 +509,8 @@ let currentView = 'general';
                                 let metricVal = (o.score || 0).toFixed(1);
 
                                 if (currentMode === 'dp') { metricLabel = "TOTAL DP"; metricVal = `${Math.round(o.dp || 0)} DP (${((o.dp || 0)/300).toFixed(2)}/s)`; }
-                                else if (currentMode === 'wave') { metricLabel = "WAVE TTC"; metricVal = `${(o.wave_ttc ? o.wave_ttc.toFixed(1) : 1800)}s`; }
-                                else if (currentMode === 'boss') { metricLabel = "BOSS TTC"; metricVal = `${(o.boss_ttc ? o.boss_ttc.toFixed(1) : 1800)}s`; }
+                                else if (currentMode === 'wave') { metricLabel = "WAVE TTC"; metricVal = `${(o.wave_ttc ? o.wave_ttc.toFixed(1) : 1800)}s` + ((o.wave_leaks || 0) > 0.5 ? ` · ${Math.round(o.wave_leaks)} leaked` : ''); }
+                                else if (currentMode === 'boss') { metricLabel = "BOSS TTC"; metricVal = `${(o.boss_ttc ? o.boss_ttc.toFixed(1) : 1800)}s` + ((o.boss_leak_pct || 0) > 0.5 ? ` · ${Math.round(o.boss_leak_pct)}% leak` : ''); }
                                 else if (currentMode === 'phys_dmg') { metricLabel = "PHYS DPS"; metricVal = Math.round(o.phys_dmg ? o.phys_dmg / 300 : 0).toLocaleString(); }
                                 else if (currentMode === 'arts_dmg') { metricLabel = "ARTS DPS"; metricVal = Math.round(o.arts_dmg ? o.arts_dmg / 300 : 0).toLocaleString(); }
                                 else if (currentMode === 'ele_dmg') { metricLabel = "ELE DPS"; metricVal = Math.round(o.elemental_dmg ? o.elemental_dmg / 300 : 0).toLocaleString(); }

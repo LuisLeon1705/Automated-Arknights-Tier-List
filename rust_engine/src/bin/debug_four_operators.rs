@@ -39,8 +39,8 @@ fn test_operator(loader: &core::data_loader::DataLoader, name: &str) {
         let mut sim = core::simulation::SimulationEnvironment::new(op.clone(), None, Some(target_stats.clone()));
         let (_cycle, _burst_end) = sim.cycle_at(avg_enemy.def, avg_enemy.res);
         let (_dmg_t, _heal_t, _dp_t, _dmg_e, _heal_e, dmg_split) = sim.run_5_minute_sim();
-        let wave_ttc = sim.run_wave_sim(avg_enemy.hp, avg_enemy.def, avg_enemy.res);
-        let boss_ttc = sim.run_boss_sim(80000.0, 1200.0, 50.0);
+        let (wave_ttc, wave_leaks) = sim.run_wave_sim(avg_enemy.hp, avg_enemy.def, avg_enemy.res);
+        let (boss_ttc, boss_leak) = sim.run_boss_sim(80000.0, 1200.0, 50.0);
 
         let phys = dmg_split.get("physical").copied().unwrap_or(0.0);
         let arts = dmg_split.get("arts").copied().unwrap_or(0.0);
@@ -81,6 +81,6 @@ fn test_operator(loader: &core::data_loader::DataLoader, name: &str) {
             survivability, hits_to_kill, surv_score, field_block, block_score);
         println!("    [BOSS] Surv: {:.0} | HTK: {:.1} | BossPhysEHP: {:.0} | BossArtsEHP: {:.0}",
             boss_surv, boss_htk, boss_phys_surv, boss_arts_surv);
-        println!("    TotalScore: {:.1} | Wave TTC: {:.1}s | Boss TTC: {:.1}s", total_score, wave_ttc, boss_ttc);
+        println!("    TotalScore: {:.1} | Wave TTC: {:.1}s (Leaked: {:.0}/100) | Boss TTC: {:.1}s (Leak: {:.1}%)", total_score, wave_ttc, wave_leaks, boss_ttc, boss_leak * 100.0);
     }
 }
