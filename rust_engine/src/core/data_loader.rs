@@ -32,6 +32,72 @@ fn normalize_buff(raw: &str, val: f64, item_kind: &str, desc: &str) -> (String, 
     let suffix = remove_brackets(suffix0);
     let pct = |v: f64| -> f64 { if v.abs() >= 5.0 { v / 100.0 } else { v } };
 
+    // Buffs bracket-namespaced to one of the operator's OWN summons/tokens (e.g. Mitm's
+    // "trshrb_t_1[trash_born].def" / ".atk", a self-nerf on his spawned debris object) describe
+    // that summon's stats, not the operator's own atk/def or an enemy-facing debuff. Since that
+    // summon isn't simulated separately, neutralize the stat instead of letting it fall through
+    // to a generic "atk"/"def" self-buff (which would wrongly zero out the operator's own stats)
+    // or a "target_atk"/"target_def" enemy debuff (which would wrongly inflate support scoring).
+    if raw.contains("trash_born") {
+        return (format!("ignored_summon_stat_{}", suffix), val, None);
+    }
+
+    // "peak_performance.X" is the Fearless/Instructor archetype's "Peak Performance" (巅峰状态)
+    // mechanic (Laios, Pallas, Fiammetta): `peak_performance.hp_ratio` is the HP% THRESHOLD that
+    // triggers the state, not a real HP buff — left unhandled it falls through to the generic
+    // "hp_ratio" stat, which calculate_stat("hp") also treats as an alias, silently inflating max
+    // HP by the threshold value (e.g. +80%). `peak_performance.<stat>` (usually atk) is the bonus
+    // granted ONLY while below that threshold; this engine has no live HP simulation to gate it
+    // dynamically, so approximate with a 50% uptime discount instead of a permanent full buff.
+    if after_at.contains("peak_performance.") {
+        if suffix == "hp_ratio" {
+            return ("ignored_peak_performance_threshold".into(), val, None);
+        }
+        return (suffix, val * 0.5, None);
+    }
+
+    // "对未被自身阻挡的敌人造成的伤害提升X%" / "非自身阻挡" (Flint's "身轻无痕" and a handful of others):
+    // a damage bonus that ONLY applies to enemies OTHER than the one this operator is blocking —
+    // splash/secondary targets, not the primary attacker the DPS/EHP formulas measure. Crediting
+    // it in full against the primary target overstates single-target performance, so discount it
+    // to a partial value representing the real-world mix of single- vs multi-enemy engagements.
+    if (suffix == "damage_scale" || suffix.contains("atk_scale")) && (desc.contains("未被自身阻挡") || desc.contains("非自身阻挡") || desc.contains("未被阻挡")) {
+        // These values are total multipliers inclusive of the base 100% (e.g. Flint's 1.45 =
+        // "+45% bonus"), so only the bonus portion above 1.0 gets discounted, not the base.
+        let discounted = if val > 1.0 { 1.0 + (val - 1.0) * 0.5 } else { val * 0.5 };
+        return (suffix, discounted, None);
+    }
+
+    // "attack_speed" is normally the OPERATOR's own ASPD buff, but a few kits reuse the exact
+    // same raw key for an ENEMY-targeted ASPD DEBUFF instead ("...敌人攻击速度-X" — Tragodia's
+    // "堕梦"/Descend into Dream talent, Pramanix's "传音回响", Mechanist's "反馈装甲"). Feeding a
+    // negative value straight into "aspd" cripples the OPERATOR'S OWN attack interval rather than
+    // the enemy's — e.g. Tragodia's RIT-X module upgrades this debuff from -16 to -24, which made
+    // the "upgrade" slow him down MORE than having no module at all. Route it to a distinct
+    // enemy-facing stat instead so it never reaches final_interval()/calculate_stat("aspd").
+    if (suffix == "attack_speed") && (desc.contains("敌人") || desc.contains("目标")) && desc.contains("攻击速度") && val < 0.0 {
+        return ("target_aspd_debuff".into(), val.abs(), Some("flat".into()));
+    }
+
+    // Lessing's "苦痛专注" talent only reduces damage from enemies she is NOT the one blocking
+    // ("受到来自非自身阻挡敌人的...伤害降低35%") — i.e. incidental splash from other mobs, not the
+    // enemy she's actively tanking. The EHP formulas model 1v1 survivability against exactly that
+    // primary attacker, so feeding this in as a blanket damage_resistance would (and did) credit
+    // her with mitigation she never gets against the enemy actually being measured.
+    if suffix == "damage_resistance" && desc.contains("非自身阻挡") {
+        return ("ignored_non_primary_target_mitigation".into(), val, None);
+    }
+
+    // Friston-3's "存续" talent (a 1-star "avoid defeat" proc: near-invincible for a short window
+    // when about to die, limited uses) stores its value as NEGATIVE (-75), unlike every genuine
+    // Sanctuary/damage-resistance buff in the dataset which is positive. damage_resistance() takes
+    // the absolute value, so the sign was being discarded and this one-shot 10s proc was applied
+    // as a permanent 70%-capped damage reduction. Treat a negative damage_resistance as this kind
+    // of conditional proc rather than a real, ever-active mitigation stat.
+    if suffix == "damage_resistance" && val < 0.0 {
+        return ("ignored_conditional_defeat_proc".into(), val, None);
+    }
+
     if suffix.starts_with("weak") {
         let nv = if val.abs() >= 1.0 { val / 100.0 } else { val };
         return if suffix.contains("magic") {
@@ -78,7 +144,13 @@ fn normalize_buff(raw: &str, val: f64, item_kind: &str, desc: &str) -> (String, 
             ("hand_cost_reduce".into(), val, Some("flat".into()))
         },
         "cost" => {
-            if val > 0.0 { ("dp_gain_per_cast".into(), val, Some("flat".into())) }
+            // A positive `cost` blackboard value is usually DP GAINED per cast (Vanguard/mercenary
+            // kits say "获得X点部署费用"), but some kits (Zinogre S Catapult, Hadiya) phrase the
+            // same key as DP CONSUMED for an equipment-swap/ammo mechanic ("消耗X点部署费用").
+            // Trust the skill's own wording over the bare sign so consumption isn't credited as
+            // generation.
+            let is_consume = desc.contains("消耗") && desc.contains("部署费用") && !desc.contains("获得") && !desc.contains("回复");
+            if val > 0.0 && !is_consume { ("dp_gain_per_cast".into(), val, Some("flat".into())) }
             else { ("ignored_cost".into(), val, Some("flat".into())) }
         },
         "attack_speed" => ("aspd".into(), val, Some("flat".into())),
@@ -378,8 +450,17 @@ impl DataLoader {
             for b in &mut s.overdrive_buffs { apply_norm(b, "skill", &d); }
             synth_pp(&mut s.buffs);
         }
+        // Module buffs carry no description of their own in this dataset (the raw game data's
+        // per-buff "upgradeDescription" text isn't preserved through import) — but a module
+        // upgrade almost always just raises the magnitude of a value the operator's own talent
+        // text already describes (e.g. Tragodia's RIT-X module upgrades "堕梦"'s enemy ASPD
+        // debuff from -16 to -24; Mayer's SUM-X upgrades her otter-talent's enemy ASPD debuff).
+        // Feed in the operator's talent descriptions so the same enemy-vs-self text checks above
+        // (which need real description text to tell a module's enemy-facing debuff apart from a
+        // self buff sharing the same raw stat key) still work for module buffs.
+        let talent_descs = op.talents.iter().map(|t| t.description.as_str()).collect::<Vec<_>>().join(" \u{1} ");
         for m in &mut op.modules {
-            for b in &mut m.buffs { apply_norm(b, "module", ""); }
+            for b in &mut m.buffs { apply_norm(b, "module", &talent_descs); }
             synth_pp(&mut m.buffs);
         }
         for s in &mut op.summons {

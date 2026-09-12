@@ -28,10 +28,10 @@ fn eval(loader: &core::data_loader::DataLoader, avg: &core::enemy::AverageEnemy,
         op.change_state(Some(i.to_string()));
 
         let mut wave_sim = core::simulation::SimulationEnvironment::new(op.clone(), None, Some(boss_target_stats(avg)));
-        let (wave_ttc, wave_leaks) = wave_sim.run_wave_sim(avg.hp, avg.def, avg.res);
+        let (_wave_ttc_raw, wave_ttc, wave_leaks) = wave_sim.run_wave_sim(avg.hp, avg.def, avg.res);
 
         let mut boss_sim = core::simulation::SimulationEnvironment::new(op.clone(), None, Some(boss_target_stats(boss)));
-        let (boss_ttc, boss_leak) = boss_sim.run_boss_sim(80000.0, 1200.0, 50.0);
+        let (_boss_ttc_raw, boss_ttc, boss_leak) = boss_sim.run_boss_sim(80000.0, 1200.0, 50.0);
 
         println!("  S{} [{}]: Wave {:.1}s (leaks {:.1}/100) | Boss {:.1}s (leak {:.1}%)",
             i + 1, s.name, wave_ttc, wave_leaks, boss_ttc, boss_leak * 100.0);
@@ -73,7 +73,7 @@ fn main() {
     myrtle.equipped_skill = Some(myrtle.skills[mi].clone());
     myrtle.change_state(Some(mi.to_string()));
     let mut ms = core::simulation::SimulationEnvironment::new(myrtle.clone(), None, Some(boss_target_stats(&boss)));
-    let (myrtle_boss_ttc, myrtle_boss_leak) = ms.run_boss_sim(80000.0, 1200.0, 50.0);
+    let (_myrtle_boss_ttc_raw, myrtle_boss_ttc, myrtle_boss_leak) = ms.run_boss_sim(80000.0, 1200.0, 50.0);
     println!("\nMyrtle boss: {:.1}s leak {:.1}% (must be ~100%: ranged, cannot hold or kill)", myrtle_boss_ttc, myrtle_boss_leak * 100.0);
     assert!(myrtle_boss_leak >= 0.9, "Myrtle must leak the boss ({}%)", myrtle_boss_leak * 100.0);
 

@@ -6,6 +6,50 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en-GB/1.1.0/) a
 
 ---
 
+## [1.0.3] - Specialization Scoring, Buffs/Debuffs/Utility Split & Enemy-Debuff Self-Nerf Fixes (2026-09-11)
+
+### ⚖️ Scoring Architecture
+
+#### Superlinear specialization curve (fixes "Swiss-army-knife" operators like Skadi/Eunectes outranking real specialists)
+- **Root cause**: the composite score summed `w_perf * (val / avg)` linearly across every stat category, so being 30% above average in ten unrelated categories scored the same as being 3x average in one — even though Arknights fields 8-12 operators per team, so maximizing a single axis (armor shred, pure Arts DPS, pure survivability) earns a slot more reliably than being merely "decent" everywhere.
+- **Fix**: raised the ratio to `ratio.powf(1.5)`. At `val == avg` this is unchanged (1^1.5 = 1, no weight recalibration needed); above average it grows superlinearly, below average it shrinks superlinearly. Verified: Skadi/Eunectes/Istina held flat or dropped in rank; Lappland the Decadenza, Wiš'adel, Lemuen, Hoshiguma the Breacher and Mantra all climbed.
+
+#### Support split into Buffs / Debuffs / Utility
+- The old single "Support" score mixed team buffs, enemy debuffs, and field-control/DP utility into one number that didn't compare like cases. Replaced with three tier list tabs: **Buffs** (team ATK/DEF/RES/Sanctuary), **Debuffs** (enemy DEF/RES shred, CC), **Utility** (DP generation, block/field control, niche). `support`/`support_score` are kept internally for the CSV export and legacy weighting but no longer double-counted in the composite score.
+- Summon-slot utility penalty (Ling, Mon3tr-likes) no longer subtracts a flat hardcoded constant; it charges the same weighted contribution an *average-utility* operator would have earned, so it self-scales with the roster instead of needing manual retuning as more operators are added.
+
+### 🐛 Fixes
+
+#### Angelina the Mellow Wish routed through Wiš'adel's hardcoded kit ("Wis" ⊂ "Wish")
+- **Root cause**: the Wiš'adel special-case dispatch in `state_rates()` matched `op.name.contains("Wis")` as a loose fallback for the accented "Wiš'adel" spelling — which also matches any name containing the substring "Wis", including **"Angelina the Mellow Wish"**. Her entire real kit was silently replaced by Wiš'adel's damage formula, which is what briefly put her at #1 of the whole roster by a wide margin.
+- **Fix**: removed the bare `"Wis"` check (the accented `"Wiš"` and exact `"Wisadel"`/char_id checks already cover the real operator safely). Also implemented her actual Talent 1 mechanic ("attacks deal an additional 25-35% ATK as bonus Arts damage"), which `damage_multiplier()` had been silently dropping (treated as a one-shot burst coefficient since the raw value is ≤ 1.0). Verified against arknights.wiki.gg. Her score fell from #1 (1971) to a still-strong #11 (441.6) — consistent with a genuinely powerful, not-yet-released CN kit.
+
+#### Mantra's S3 (Truth Unchanted) never actually activated
+- **Root cause**: the S3 branch matched `s_name.contains("真言") || s_name.contains("震荡")`, neither of which is a substring of her real S3 name **"无言为真"** — so equipping S3 always fell through to the generic S1/S2 fallback, silently dropping her signature Paralysis-overflow chain explosion regardless of skill choice.
+- **Fix**: match on her real skill name; recalibrated the (previously flat, ATK-independent) damage numbers to scale with her actual final ATK and the verified 145%/185% ATK values from arknights.wiki.gg.
+
+#### Sanctuary/庇护 credited as permanently active when it's gated behind an ally's HP
+- **Root cause**: Tsukinogi, Nine-Colored Deer and Eunectes's Sanctuary talents only trigger when the target's HP crosses a threshold ("生命少于40%时…获得庇护" / Eunectes's own "生命值不高于一半时…获得22%庇护"), but both the team-buff crediting path (`main.rs`) and the self-EHP path (`damage_resistance()`) credited the full value unconditionally, as if it were always up.
+- **Fix**: new `Operator::sanctuary_hp_gate_factor()` reads the literal threshold from the talent/skill text (including the word "一半" = "half", not just digit percentages) and discounts by how often that condition is realistically true — a low-HP gate (rare) discounts hard, a high-HP gate (Quercus's "HP > 70%", almost always true) barely discounts, and kits with no HP condition at all (Haruka's per-attack-interval bubble) are untouched. Tsukinogi dropped from #44 to #120 (223.8 → 99.1 score) — now consistent with her real reputation as one of the weaker 5★ supports.
+
+#### CC durations (Fear/Frighten/Stun/Slow) credited even when they're only a per-hit chance
+- **Root cause**: Lappland the Decadenza's S1 fear ("浮游单元攻击时有{prob}%几率使目标恐惧") is a probabilistic proc, but `calculate_stat()` has no notion of an associated trigger chance and credited the full duration as guaranteed on every hit.
+- **Fix**: new `cc_duration_with_prob()` discounts a CC-duration stat by the trigger probability of a buff sharing the same source skill/talent, when one exists. Also extended the existing Stun/Silence enemy-immunity discount to Frighten and Fear (no dedicated immunity stat exists for them, so `stun_immune_ratio` is reused as the closest verified "hard CC" proxy) — this only changes results when ranking against a tougher enemy tier (Elite/Boss), which is also what makes the category split below meaningful.
+
+#### Enemy-targeted ASPD debuffs mis-applied to the operator's OWN attack speed
+- **Root cause**: the raw `attack_speed` blackboard key is normally the operator's own ASPD buff, but three kits reuse the identical key for an **enemy**-targeted ASPD debuff instead — Tragodia's "堕梦" talent ("全场…敌人攻击速度-16"), Mayer's otter talent ("被机械水獭阻挡的敌人攻击速度-25"), and Sesa's S2 ("使目标攻击速度-X"). A negative value landing on `calculate_stat("aspd")` slows the operator down instead of the enemy. This is exactly why **Tragodia's RIT-X module (which upgrades the debuff from -16 to -24) scored *lower* than no module at all** — the "upgrade" was slowing him down more than having nothing equipped.
+- **Fix**: `normalize_buff()` now routes a negative `attack_speed` value mentioning "敌人" or "目标" to a distinct `target_aspd_debuff` stat instead, which is credited as a (small) Debuff score contribution rather than crippling `final_interval()`. Module buffs carry no description of their own in this dataset, so module-sourced buffs are now checked against the operator's talent text too (a module almost always just upgrades a value the talent already describes). Verified: Tragodia/Mayer/Sesa's modules now score higher than no module, as they should.
+
+#### Physical EHP formula multiplied by the enemy's raw ATK instead of the DEF-mitigated hit
+- **Root cause**: `calculate_ehp_phys_against()` correctly computed `dmg_taken` (post-DEF, floored at 5% of ATK) to figure out how many hits the operator's HP pool survives (capped at 20), but then multiplied that hit count by the enemy's **unmitigated** `e_atk` for the final EHP value instead of by `dmg_taken`. For any operator whose DEF nearly cancels the attacker's ATK (Eunectes's *Iron Will* DEF landing almost exactly on the new Contingency Contract target's ATK), this threw away almost all of the mitigation credit and re-inflated the result using the full raw hit strength — reporting ~28,000-35,000 "survivability" against an attacker she'd barely take chip damage from.
+- **Fix**: the final multiplication now uses `dmg_taken` (the actual mitigated per-hit damage), matching what "effective HP absorbed" should mean. Squishy operators (where DEF barely reduces `e_atk`) are essentially unaffected; tanky operators against a target their DEF nearly walls out see EHP drop to a realistic range (Eunectes: ~35,500 → ~11,900 against the toughest target).
+
+### ✨ New: Contingency Contract (CC) target category
+- Added as a 6th specialized target profile alongside Normal/Elite/Boss/RA/IS — modeled as tougher than the plain Boss profile across the board (1,300 DEF / 60 RES / 110,000 HP / 1,600 ATK, 90%+ hard-CC immunity), reflecting that CC stacks hazard modifiers on top of a boss-plus-elite-wave field and is the single most demanding permanent mode in the game. Carries its own light scoring bonus favoring burst-against-high-value-targets and CC utility, mirroring the existing RA/IS bonuses.
+- `generate_tierlist_pdfs.py` now also generates PDFs for the Buffs/Debuffs/Utility metrics and the Contingency Contract category (previously only Support/Score/DPS/Survivability/Healing metrics were exported).
+
+---
+
 ## [1.0.2] - Leaking System (Wave Clear / Boss Killer), Mon3tr Talent Fix & Medic Damage (2026-09-11)
 
 ### 🐛 Fixes

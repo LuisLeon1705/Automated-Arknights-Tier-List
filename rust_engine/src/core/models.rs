@@ -1071,6 +1071,7 @@ impl Operator {
         }
 
         let mut groups: HashMap<String, (f64, f64, bool)> = HashMap::new(); // name -> (max_scale, prob, prob_set)
+        let mut m = 1.0;
         for b in &buffs {
             // For Dollkeepers, damage_scale in talents/modules is substitute spawn burst on death, not basic attack scale
             if is_dollkeeper && b.stat.contains("damage_scale") && !self.is_skill_active {
@@ -1078,6 +1079,24 @@ impl Operator {
             }
             // Elemental fallout / end-of-effect bursts are one-shot scales, never per-hit multipliers
             if b.stat.contains("ep_damage_scale") || b.stat.contains("damage_by_atk_scale") {
+                continue;
+            }
+            // Mitm's TAC-Y module pairs `atk_scale` (165% ATK) with a bare `interval` blackboard
+            // key (15s): Cherry No.3's periodic burst attack, not a permanent per-hit multiplier
+            // on Mitm's own basic attack (which runs on a ~1s cadence). Convert it to an
+            // expected-value duty cycle instead of folding the full 1.65x into every hit.
+            if self.name == "Mitm" && !module_name.is_empty() && b.name == module_name && b.stat == "atk_scale" {
+                let v = b.value.as_f64().unwrap_or(1.0);
+                if v > 1.0 {
+                    let period = self.active_module.as_ref()
+                        .and_then(|md| md.buffs.iter().find(|mb| mb.stat == "interval"))
+                        .and_then(|mb| mb.value.as_f64())
+                        .unwrap_or(1.0)
+                        .max(0.1);
+                    let own_interval = self.final_interval().max(0.1);
+                    let duty = (own_interval / period).clamp(0.02, 1.0);
+                    m *= 1.0 + (v - 1.0) * duty;
+                }
                 continue;
             }
             let is_scale = (b.stat.contains("atk_scale") && !b.stat.contains("damage_by_atk_scale"))
@@ -1109,7 +1128,6 @@ impl Operator {
                 }
             }
         }
-        let mut m = 1.0;
         for (_n, (s, p, _ps)) in groups {
             if s <= 0.0 { continue; }
             let contrib = 1.0 + p * (s - 1.0);
@@ -1227,14 +1245,79 @@ impl Operator {
         s
     }
 
+    /// Finds `marker` in `desc` and reads the percentage threshold right after it — either a
+    /// literal number ("生命少于40%" -> 0.4) or the word "一半" ("half", used by kits like
+    /// Eunectes's "生命值不高于一半" instead of writing "50%" as a digit). Returns None if the
+    /// marker isn't present or neither form follows it within a few characters.
+    fn extract_hp_threshold_after(desc: &str, marker: &str) -> Option<f64> {
+        let idx = desc.find(marker)? + marker.len();
+        let rest = &desc[idx..];
+        if let Some(pct_pos) = rest.find('%') {
+            if pct_pos <= 6 {
+                let digits: String = rest[..pct_pos].chars().rev().take_while(|c| c.is_ascii_digit()).collect::<Vec<_>>().into_iter().rev().collect();
+                if !digits.is_empty() {
+                    if let Ok(v) = digits.parse::<f64>() { return Some(v / 100.0); }
+                }
+            }
+        }
+        if rest.chars().take(4).collect::<String>().contains("一半") {
+            return Some(0.5);
+        }
+        None
+    }
+
+    /// Estimates how often an HP-gated Sanctuary/庇护 grant ("生命少于40%时...获得庇护",
+    /// "生命值不高于一半时...获得庇护") is actually true mid-fight, instead of crediting it as
+    /// permanently active. A LOW-HP gate (少于/低于/不高于 X%) is rare — the lower X is, the
+    /// rarer — so it scales down with X. A HIGH-HP gate (大于/高于/不低于 X%, e.g. Quercus) is
+    /// true most of the time an ally/self isn't freshly hit, so it only gets a mild discount.
+    /// Kits with no HP condition at all (Haruka's bubble, which pops on ANY hit regardless of
+    /// HP) are left at 1.0 — unaffected. Shared by both the self-EHP calc below and the
+    /// ally-buff crediting in main.rs, since the same conditional-proc mistake applies to both
+    /// a self-Sanctuary talent (Eunectes) and a team-Sanctuary one (Tsukinogi).
+    pub fn sanctuary_hp_gate_factor(&self) -> f64 {
+        let mut factor = 1.0f64;
+        let mut texts: Vec<&str> = self.talents.iter().map(|t| t.description.as_str()).collect();
+        if let Some(s) = &self.equipped_skill { texts.push(s.description.as_str()); }
+        for desc in &texts {
+            if !(desc.contains("庇护") || desc.contains("浮泡")) { continue; }
+            let low = Self::extract_hp_threshold_after(desc, "生命值不高于")
+                .or_else(|| Self::extract_hp_threshold_after(desc, "生命不高于"))
+                .or_else(|| Self::extract_hp_threshold_after(desc, "生命值低于"))
+                .or_else(|| Self::extract_hp_threshold_after(desc, "生命少于"));
+            if let Some(pct) = low {
+                factor = factor.min((pct * 0.9).clamp(0.05, 0.65));
+                continue;
+            }
+            let high = Self::extract_hp_threshold_after(desc, "生命值不低于")
+                .or_else(|| Self::extract_hp_threshold_after(desc, "生命不低于"))
+                .or_else(|| Self::extract_hp_threshold_after(desc, "生命值高于"))
+                .or_else(|| Self::extract_hp_threshold_after(desc, "生命大于"));
+            if let Some(pct) = high {
+                factor = factor.min((1.0 - (1.0 - pct) * 0.9).clamp(0.35, 0.95));
+            }
+        }
+        factor
+    }
+
     pub fn damage_resistance(&self) -> f64 {
         let mut max_res = 0.0;
+        let mut max_scale = 1.0;
         for b in self.get_active_buffs() {
             if b.stat == "damage_resistance" || b.stat == "sanctuary" || b.stat == "damage_reduction" {
                 let mut v = b.value.as_f64().unwrap_or(0.0).abs();
                 if v >= 5.0 { v /= 100.0; }
                 if v > max_res { max_res = v; }
+            } else if b.stat == "damage_resistance_scale" {
+                // e.g. Haruka S3 "浮泡提供的庇护提升至{damage_resistance_scale}倍": the skill
+                // multiplies the base Sanctuary bubble strength rather than replacing it.
+                let v = b.value.as_f64().unwrap_or(1.0).abs();
+                if v > max_scale { max_scale = v; }
             }
+        }
+        max_res *= self.sanctuary_hp_gate_factor();
+        if self.is_skill_active {
+            max_res *= max_scale;
         }
         max_res.clamp(0.0, 0.70)
     }
@@ -1334,7 +1417,17 @@ impl Operator {
         let dmg_taken = f64::max(0.05 * e_atk, e_atk - def);
         let hits_survived = (total_pool / dmg_taken).clamp(1.0, 20.0);
         let dmg_resist = (1.0 - self.damage_resistance()).clamp(0.20, 1.0);
-        (hits_survived * e_atk) / dmg_resist
+        // Total damage actually absorbed = hits survived * the DEF-mitigated damage per hit
+        // (`dmg_taken`), not the enemy's raw pre-mitigation ATK. Multiplying by `e_atk` here
+        // instead double-counted DEF's benefit: it already shrank `dmg_taken` (and so let more
+        // hits fit in `total_pool`), then this line threw that mitigation away and re-scaled the
+        // result by the enemy's full unmitigated hit strength anyway. That made EHP balloon
+        // toward `20 * enemy_atk` for any operator tanky enough to cap the 20-hit ceiling,
+        // dominated by the target's ATK stat rather than the operator's own bulk — most visible
+        // for near-DEF-nullifying tanks (e.g. Eunectes's S3 DEF landing almost exactly on a
+        // high-ATK target's ATK) reporting tens of thousands of "survivability" against a boss
+        // they'd barely take chip damage from in the first place.
+        (hits_survived * dmg_taken) / dmg_resist
     }
 
     pub fn calculate_ehp_arts_against(&self, _enemy_atk: f64) -> f64 {

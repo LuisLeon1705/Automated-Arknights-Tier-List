@@ -26,6 +26,7 @@ The engine benchmarks configurations against distinct combat scenarios:
 - **Bosses**: High-threat targets (1,000 DEF, 50 RES, 80k HP, high ATK).
 - **Reclamation Algorithm (RA)**: Horde control, wide AoE coverage, and frontline durability.
 - **Integrated Strategies (IS)**: Roguelike burst damage scaling and crowd control (CC).
+- **Contingency Contract (CC)**: The single most demanding permanent mode — a hazard-buffed boss-plus-elite-wave field, modeled tougher than the plain Boss profile across DEF/RES/HP/ATK.
 - **DP Generators**: Specialized Vanguard benchmark tracking DP production reliability.
 
 ### 3. Comprehensive Metric Modeling
@@ -40,7 +41,7 @@ The engine benchmarks configurations against distinct combat scenarios:
 
 ```
 TierList/
-├── CHANGELOG.md                # Version history & patch notes (v1.0.0)
+├── CHANGELOG.md                # Version history & patch notes (v1.0.3)
 ├── DOCUMENTATION.md            # Comprehensive technical documentation & API reference
 ├── data/                       # Processed JSON databases and PDF archives
 │   ├── Automated_Operators.json
@@ -110,7 +111,7 @@ This automatically produces detailed PDF ranking documents for every category an
 ---
 
 ## Versioning & Updates
-Current Version: **v1.0.2 (Stable Core Release)**  
+Current Version: **v1.0.3 (2026-09-11)**  
 See [`CHANGELOG.md`](file:///C:/Users/leonp/OneDrive/Escritorio/TierList/CHANGELOG.md) for the complete version history, release notes, and known considerations for this initial release.
 
 "# Automated-Arknights-Tier-List" 

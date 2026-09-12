@@ -234,7 +234,7 @@ impl SimulationEnvironment {
             let bubble_heal_ratio = if is_haruka { 0.31 } else { 0.0 };
             
             if is_skill {
-                // When skill is active, Abjurers stop attacking enemies and heal allies for 75% ATK
+                // When skill is active, Abjurers stop attacking enemies and heal allies instead.
                 let mut heal_targets = 1.0;
                 let mut bubble_targets = 1.0;
                 if let Some(s) = &op.equipped_skill {
@@ -243,7 +243,13 @@ impl SimulationEnvironment {
                         bubble_targets = 2.0;
                     }
                 }
-                let hm = if heal_buff >= 0.75 { heal_buff } else { 0.75 };
+                // heal_buff is this skill's real stated heal_scale / atk_to_hp_recovery_ratio
+                // (e.g. Tsukinogi S2 12% ATK/s, Xingzhu S1/S2 heal_scale). Use it whenever the
+                // kit states one. 0.75 is a rough stand-in ONLY for Haruka's conditional
+                // bubble-pop heal (28% ATK per pop, not a flat per-second blackboard stat) — it
+                // must not leak onto other Abjurers whose skills genuinely heal for less (or, for
+                // pure atk/aspd-buff skills with no heal mechanic at all, for nothing).
+                let hm = if heal_buff > 0.0 { heal_buff } else if is_haruka { 0.75 } else { 0.0 };
                 let direct_hps = heal_targets * atk * hm / interval;
                 let bubble_hps = bubble_targets * atk * bubble_heal_ratio / interval;
                 r.heal_per_sec = direct_hps + bubble_hps;
@@ -251,8 +257,12 @@ impl SimulationEnvironment {
                 r.arts_per_shot = 0.0;
                 return r;
             } else {
-                // Base state: deals Arts damage, and bubbles passively heal allies
-                r.arts_per_shot = atk * dmg_mult;
+                // Base state: like Medics, Abjurers' basic "attack" action targets ALLIES
+                // (shields/heals), not enemies — verified against every current roster member's
+                // kit text (Haruka, Silence, Nine-Colored Deer, Perfumer, Quercus, Tsukinogi,
+                // Xingzhu): none of them deal enemy-facing damage while idle. Only the passive
+                // shield-pop bubble (Haruka) heals here; no arts_per_shot.
+                r.arts_per_shot = 0.0;
                 r.heal_per_sec = atk * bubble_heal_ratio / interval;
                 return r;
             }
@@ -379,14 +389,14 @@ impl SimulationEnvironment {
                     let attacks = sd.contains("伤害类型变为") && sd.contains("真实")
                         || sd.contains("可以攻击")
                         || sd.contains("攻击阻挡的所有敌人")
-                        || (sd.contains("对敌人造成") && !sd.contains("无法对敌人") && !sd.contains("不会对敌人"));
+                        || (sd.contains("敌人造成") && !sd.contains("无法对敌人") && !sd.contains("不会对敌人"));
                     if attacks {
                         let is_true = sd.contains("伤害类型变为") && sd.contains("真实")
                             || sd.contains("造成真实伤害")
-                            || (sd.contains("对敌人造成") && sd.contains("真实伤害"));
+                            || (sd.contains("敌人造成") && sd.contains("真实伤害"));
                         let is_phys = !is_true && (sd.contains("物理伤害")
                             || sd.contains("攻击阻挡的所有敌人")
-                            || (sd.contains("对敌人造成") && !sd.contains("法术") && !sd.contains("元素")));
+                            || (sd.contains("敌人造成") && !sd.contains("法术") && !sd.contains("元素")));
                         if is_true {
                             r.true_per_shot = atk * dmg_mult;
                         } else if is_phys {
@@ -694,13 +704,24 @@ impl SimulationEnvironment {
         }
 
         // WIS'ADEL (Flinger, Physical #3, char_1035_wisdel)
-        if op.is_char("char_1035_wisdel") || op.name == "Wisadel" || op.name.contains("Wis") || op.name.contains("Wiš") || op.name.contains("维什戴尔") {
+        // NOTE: bare `contains("Wis")` used to be in this condition and silently matched ANY
+        // operator whose name contains that substring — including "Angelina the Mellow **Wis**h",
+        // which routed her entire kit through this hardcoded branch instead of her own. Match
+        // only real Wiš'adel spellings/ids.
+        if op.is_char("char_1035_wisdel") || op.name == "Wisadel" || op.name.contains("Wiš") || op.name.contains("维什戴尔") {
             if is_skill {
                 if s_name == "Explosive Dawn" || s_desc.contains("Explosive Dawn") || s_name.contains("黎明") || s_name.contains("破晓") {
-                    // S3: 6 ammo, 5.0s interval, composite aftershock + shadows = 7,600 physical DPS
-                    r.attacks_per_sec = 1.0 / 5.0;
+                    // S3: 6 ammo, composite aftershock + shadows, calibrated to 7,600 physical DPS
+                    // (38,000 dmg per activation) at her base kit's 1924 ATK on a 5.0s cadence.
+                    // Scale per-shot damage with her real ATK and use her real interval (module
+                    // aspd/interval buffs shorten the cadence) so a module's stat gains — already
+                    // reflected in `atk`/`interval` — actually raise her S3 output, instead of
+                    // being silently discarded by a flat hardcoded 38000/5.0s.
+                    let base_atk_ref = 1924.0_f64;
+                    let dmg_per_atk = 38000.0 / base_atk_ref;
+                    r.attacks_per_sec = 1.0 / interval.max(0.1);
                     r.shots_per_attack = 1.0;
-                    r.phys_per_shot = 38000.0;
+                    r.phys_per_shot = atk * dmg_per_atk;
                 } else if s_name.contains("饱和") {
                     r.phys_per_shot = atk * 1.8 * 2.0;
                     r.shots_per_attack = 2.0;
@@ -945,12 +966,27 @@ impl SimulationEnvironment {
         // MANTRA (Primal Caster, Elemental #3)
         if op.is_char("char_4204_mantra") || op.name == "Mantra" || op.name.contains("曼陀罗") {
             if is_skill {
-                if s_name.contains("真言") || s_desc.contains("真言") || s_name.contains("震荡") {
-                    // S3: Bouncing elemental projectiles + 2.5x EP burst = 3,800 Elemental DPS
-                    r.elemental_per_shot = 2200.0;
-                    r.attacks_per_sec = 1.0 / 1.5;
-                    r.flat_ele_dps = 2400.0;
-                    r.arts_per_shot = 0.0;
+                // NOTE: this used to match on "真言"/"震荡", neither of which is a substring of her
+                // real S3 name "无言为真" ("Truth Unchanted") — so S3 never actually matched this
+                // branch and always fell to the generic S1/S2 numbers below instead, silently
+                // dropping her signature Paralysis-overflow chain explosion regardless of which
+                // skill was equipped.
+                if s_name.contains("无言为真") || s_name.contains("Truth Unchanted") {
+                    // S3 "Truth Unchanted" (verified via arknights.wiki.gg): her own "atk" self-buff
+                    // (+275% at max) is already folded into `atk` via final_atk(), so it doesn't need
+                    // to be reapplied here. Her basic attack deals Arts damage per her trait; Talent 1
+                    // "Quiet Zone" (145% ATK Elemental whenever an enemy's Paralysis triggers) procs
+                    // roughly once per landed attack. The stack-overflow chain explosion (185% ATK
+                    // Elemental jumping target<->1 other enemy, granted once per Paralysis stack above
+                    // the S3-lowered 2-stack cap, itself granted when ANY operator in range casts a
+                    // skill, up to 3 times per activation) depends on ally skill-cast cadence this sim
+                    // doesn't track — approximated as one overflow proc roughly every 10s of a real
+                    // multi-operator fight rather than the previous flat, ATK-independent guess.
+                    r.arts_per_shot = atk;
+                    r.elemental_per_shot = atk * 1.45;
+                    r.flat_ele_dps = atk * 1.85 / 10.0;
+                    r.attacks_per_sec = 1.0 / interval;
+                    r.shots_per_attack = 1.0;
                 } else {
                     r.elemental_per_shot = 1400.0;
                     r.flat_ele_dps = 1200.0;
@@ -1004,6 +1040,22 @@ impl SimulationEnvironment {
 
         let per_shot = atk * dmg_mult;
         if arts || incantation { r.arts_per_shot = per_shot; } else { r.phys_per_shot = per_shot; }
+
+        // "Attacks deal an additional X% of ATK as Arts Damage" secondary-hit kits
+        // (Angelina the Mellow Wish's Floating Above the Earth: `atk_scale_hi` for
+        // light/weight<=3 targets, `atk_scale_lo` for everyone else) are a SEPARATE damage
+        // instance layered on every basic attack, not a multiplier on it. damage_multiplier()
+        // intentionally skips atk_scale values <= 1.0 there (those encode one-shot burst
+        // coefficients elsewhere), so add the baseline/low value here as extra arts_per_shot
+        // instead — the average enemy isn't guaranteed to be weight <= 3, so the higher
+        // "hi" variant is never assumed.
+        let extra_arts_ratio = op.get_active_buffs().iter()
+            .filter(|b| b.stat == "atk_scale_lo")
+            .filter_map(|b| b.value.as_f64())
+            .fold(0.0f64, f64::max);
+        if extra_arts_ratio > 0.0 {
+            r.arts_per_shot += atk * extra_arts_ratio;
+        }
 
         if op.is_primal() {
             let ep_scale = op.elemental_scale();
@@ -1611,16 +1663,22 @@ impl SimulationEnvironment {
     }
 
     /// Wave Clearer simulation: 10 waves of 10 enemies (100 total) with 10s breaks.
-    /// Returns `(total_time, leaked_enemies)`.
+    /// Returns `(raw_time, penalized_time, leaked_enemies)`: `raw_time` is the clean clear
+    /// speed with no leak penalty, `penalized_time` applies the leak surcharge on top of it
+    /// (used for ranking), and `leaked_enemies` is the count out of 100.
     ///
     /// Leaking model (O(1), no discrete stepping):
     /// - Each wave gives the operator a 15s window. Enemies still alive when the window
-    ///   closes leak past the operator toward the defense point (1% wave score penalty each,
-    ///   applied as a proportional time inflation on the returned TTC).
+    ///   closes leak past the operator toward the defense point (1% time penalty per leaked
+    ///   enemy out of the 100-enemy onslaught, e.g. 11 leaked -> +11% on `penalized_time`).
     /// - A living melee operator whose field block covers the remaining mobs physically
     ///   contains them, so nothing leaks while they keep dying to the operator's damage.
     /// - An operator that dies mid-wave cannot hold the lane; blocked mobs escape.
-    pub fn run_wave_sim(&mut self, enemy_hp: f64, enemy_def: f64, enemy_res: f64) -> (f64, f64) {
+    /// - Ranged operators are never actually blocking the mobs that hit them in real play —
+    ///   they aren't standing in contact with a blocked enemy — so they're exempt from the
+    ///   "dies to blocked-mob contact damage" defeat/redeploy penalty (their real fragility is
+    ///   already reflected in the separate Survivability score, not in this clear-speed test).
+    pub fn run_wave_sim(&mut self, enemy_hp: f64, enemy_def: f64, enemy_res: f64) -> (f64, f64, f64) {
         let ([bp, ba, bt, be, _bh, sp, sa, st, se, _sh], end_burst) = self.cycle_at(enemy_def, enemy_res);
 
         let has_skill = self.primary_operator.equipped_skill.is_some();
@@ -1655,7 +1713,8 @@ impl SimulationEnvironment {
             // Cannot kill anything: the whole 100-enemy onslaught leaks unless a living
             // melee operator can physically contain all 10 per-wave mobs at once.
             let can_hold_all = !is_ranged && block_power >= 10.0;
-            return (1800.0, if can_hold_all { 0.0 } else { 100.0 });
+            let leaks = if can_hold_all { 0.0 } else { 100.0 };
+            return (1800.0, (1800.0f64 * (1.0 + leaks / 100.0)).min(1800.0), leaks);
         }
 
         let (t_base, t_skill, n_casts) = self.get_cycle_times(300.0);
@@ -1663,7 +1722,7 @@ impl SimulationEnvironment {
         if end_burst > 0.0 { avg_dps += (end_burst * s_hit_mult) * n_casts / 300.0; }
 
         if avg_dps <= 0.1 {
-            return (1800.0, 100.0);
+            return (1800.0, 1800.0, 100.0);
         }
 
         let wave_hp = enemy_hp * 10.0;
@@ -1671,7 +1730,10 @@ impl SimulationEnvironment {
 
         let mut wave_defeat_penalty = 0.0;
         let mut is_defeated = false;
-        if net_wave_incoming_dps > 0.0 {
+        // Ranged operators aren't the ones physically blocking mobs, so they don't take the
+        // blocked-mob contact damage this defeat check models; only melee/blocking operators
+        // can be worn down and forced to redeploy mid-wave.
+        if !is_ranged && net_wave_incoming_dps > 0.0 {
             let survival_time = (op_pool / net_wave_incoming_dps) + immortality;
             if survival_time < time_to_kill {
                 is_defeated = true;
@@ -1693,17 +1755,21 @@ impl SimulationEnvironment {
         let total_leaks = (leaked_per_wave * 10.0).min(100.0);
 
         // 10 waves + 9 breaks of 10s + defeat penalty per wave
-        let mut total_time = (time_to_kill * 10.0) + 90.0 + (wave_defeat_penalty * 10.0);
+        let raw_time = ((time_to_kill * 10.0) + 90.0 + (wave_defeat_penalty * 10.0)).min(1800.0);
 
-        // Each leaked enemy (out of the 100-enemy onslaught) penalizes 1% of the wave score
-        total_time *= 1.0 + total_leaks / 100.0;
+        // Each leaked enemy (out of the 100-enemy onslaught) costs 1% of the clear time on top
+        // of the raw speed, e.g. 11/100 leaked -> raw_time * 1.11. This penalized figure is what
+        // actually ranks the Wave Clearer category; `raw_time` is kept for reference.
+        let penalized_time = (raw_time * (1.0 + total_leaks / 100.0)).min(1800.0);
 
-        (total_time.min(1800.0), total_leaks)
+        (raw_time, penalized_time, total_leaks)
     }
 
     /// Boss Killer simulation: 2 phases with a 15s revive cooldown between them.
-    /// Returns `(total_time, leak_ratio)` where `leak_ratio` is the fraction of the
-    /// boss's HP that passes the operator before dying (0.0 = perfect containment).
+    /// Returns `(raw_time, penalized_time, leak_ratio)`: `raw_time` is the clean kill speed,
+    /// `penalized_time` applies the leak surcharge on top (used for ranking), and `leak_ratio`
+    /// is the fraction of the boss's HP that passes the operator before dying (0.0 = perfect
+    /// containment).
     ///
     /// Leaking model:
     /// - A phase must be defeated within a 30s travel window; anything beyond leaks
@@ -1713,10 +1779,14 @@ impl SimulationEnvironment {
     /// - Operators defeated mid-phase cannot redeploy inside the travel window
     ///   (70s redeploy > 30s window), so the boss fully leaks.
     /// - Executors with fast redeploy leak the boss while off-field between deployments.
-    pub fn run_boss_sim(&mut self, boss_hp: f64, boss_def: f64, boss_res: f64) -> (f64, f64) {
+    /// - Ranged operators aren't blocking the boss, so they're exempt from the "dies to the
+    ///   boss's melee contact hits" defeat/redeploy penalty — real snipers/casters fight bosses
+    ///   from range; their fragility already shows up in the separate Survivability score.
+    pub fn run_boss_sim(&mut self, boss_hp: f64, boss_def: f64, boss_res: f64) -> (f64, f64, f64) {
         let ([bp, ba, bt, be, _bh, sp, sa, st, se, _sh], end_burst) = self.cycle_at(boss_def, boss_res);
 
         let has_skill_boss = self.primary_operator.equipped_skill.is_some();
+        let is_ranged = self.primary_operator.get_position() != "MELEE";
         let e_interval = self.target_stats.get("attack_interval").copied().unwrap_or(3.0).max(0.5);
         let boss_atk = self.target_stats.get("atk").copied().unwrap_or(1200.0).max(100.0);
 
@@ -1744,7 +1814,7 @@ impl SimulationEnvironment {
             self.primary_operator.is_skill_active = false;
         }
 
-        if b_dps <= 0.0 && s_dps <= 0.0 { return (1800.0, 1.0); }
+        if b_dps <= 0.0 && s_dps <= 0.0 { return (1800.0, 1800.0, 1.0); }
 
         // Against boss: skill starts active at engagement IF operator can block or is not a duelist blocked by weight
         let is_duelist = self.primary_operator.is_duelist();
@@ -1759,7 +1829,7 @@ impl SimulationEnvironment {
         let mut avg_dps = ((b_dps * t_base) + (s_dps * t_skill)) / 300.0;
         if end_burst > 0.0 { avg_dps += end_burst * n_casts / 300.0; }
 
-        if avg_dps <= 0.1 { return (1800.0, 1.0); }
+        if avg_dps <= 0.1 { return (1800.0, 1800.0, 1.0); }
 
         let mut phase_time = boss_hp / avg_dps;
 
@@ -1804,7 +1874,9 @@ impl SimulationEnvironment {
                 }
             }
         }
-        if net_incoming_dps > 0.0 {
+        // Ranged operators aren't blocking the boss, so they never take its melee contact
+        // damage in the first place — only melee/blocking operators can be worn down here.
+        if !is_ranged && net_incoming_dps > 0.0 {
             let survival_time = (op_pool / net_incoming_dps) + immortality;
             if survival_time < phase_time {
                 is_defeated = true;
@@ -1815,7 +1887,6 @@ impl SimulationEnvironment {
         }
 
         // ---- Leaking: the boss must die inside its travel window or it reaches the blue box ----
-        let is_ranged = self.primary_operator.get_position() != "MELEE";
         self.primary_operator.is_skill_active = has_skill_boss;
         let field_block = self.primary_operator.total_field_block();
         self.primary_operator.is_skill_active = false;
@@ -1845,8 +1916,11 @@ impl SimulationEnvironment {
         }
         boss_leak_ratio = boss_leak_ratio.clamp(0.0, 1.0);
 
-        // 2 phases + 15s revive + defeat penalty, inflated proportionally by the leak penalty
-        let total_time = ((phase_time * 2.0) + 15.0 + defeat_penalty_time) * (1.0 + boss_leak_ratio);
-        (total_time.min(1800.0), boss_leak_ratio)
+        // 2 phases + 15s revive + defeat penalty
+        let raw_time = ((phase_time * 2.0) + 15.0 + defeat_penalty_time).min(1800.0);
+        // Leak surcharge on top of the raw kill speed: this penalized figure is what actually
+        // ranks the Boss Killer category; `raw_time` is kept for reference.
+        let penalized_time = (raw_time * (1.0 + boss_leak_ratio)).min(1800.0);
+        (raw_time, penalized_time, boss_leak_ratio)
     }
 }

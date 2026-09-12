@@ -178,6 +178,7 @@
                 <option value="dp">DP Generators (Pioneers, Agents & Flagbearers)</option>
                 <option value="ra">Reclamation Algorithm (RA Special Modules & Horde Combat)</option>
                 <option value="is">Integrated Strategies (IS Special Modules & Roguelike Scaling)</option>
+                <option value="cc">Contingency Contract (CC - Hazard-Scaled Threats)</option>
             </select>
         </div>
 
@@ -195,7 +196,9 @@
                 <option value="heal_phys">Healing & Phys Mitigation</option>
                 <option value="heal_arts">Healing & Arts Mitigation</option>
                 <option value="heal_ele">Healing & Elemental Mitigation</option>
-                <option value="support">Support / Buffs</option>
+                <option value="buffs">Buffs (Team ATK/DEF/RES/Sanctuary)</option>
+                <option value="debuffs">Debuffs (Enemy DEF/RES Shred, CC)</option>
+                <option value="utility">Utility (DP, Field Control, Niche)</option>
                 <option value="surv">Survivability (Overall Bulk & HTK)</option>
                 <option value="phys_surv">Physical Survivability (Phys EHP)</option>
                 <option value="arts_surv">Arts Survivability (Arts EHP)</option>
@@ -294,7 +297,8 @@ let currentView = 'general';
                         'boss': 'Bosses',
                         'dp': 'DP Generation Benchmark (Pioneers, Agents & Flagbearers)',
                         'ra': 'Reclamation Algorithm (生息演算 Horde Target)',
-                        'is': 'Integrated Strategies (集成战略 Elite Target)'
+                        'is': 'Integrated Strategies (集成战略 Elite Target)',
+                        'cc': 'Contingency Contract (危机合约 Hazard-Scaled Target)'
                     };
                     const catLabel = catNames[data.category] || data.category.toUpperCase();
                     document.getElementById('target-title-label').innerText = catLabel;
@@ -398,7 +402,9 @@ let currentView = 'general';
         else if (currentMode === 'heal_phys') { sortField = 'heal_phys'; asc = false; }
         else if (currentMode === 'heal_arts') { sortField = 'heal_arts'; asc = false; }
         else if (currentMode === 'heal_ele') { sortField = 'heal_ele'; asc = false; }
-        else if (currentMode === 'support') { sortField = 'support'; asc = false; }
+        else if (currentMode === 'buffs') { sortField = 'buffs'; asc = false; }
+        else if (currentMode === 'debuffs') { sortField = 'debuffs'; asc = false; }
+        else if (currentMode === 'utility') { sortField = 'utility'; asc = false; }
         else if (currentMode === 'surv') { sortField = 'surv'; asc = false; }
         else if (currentMode === 'phys_surv') { sortField = 'phys_surv'; asc = false; }
         else if (currentMode === 'arts_surv') { sortField = 'arts_surv'; asc = false; }
@@ -509,8 +515,8 @@ let currentView = 'general';
                                 let metricVal = (o.score || 0).toFixed(1);
 
                                 if (currentMode === 'dp') { metricLabel = "TOTAL DP"; metricVal = `${Math.round(o.dp || 0)} DP (${((o.dp || 0)/300).toFixed(2)}/s)`; }
-                                else if (currentMode === 'wave') { metricLabel = "WAVE TTC"; metricVal = `${(o.wave_ttc ? o.wave_ttc.toFixed(1) : 1800)}s` + ((o.wave_leaks || 0) > 0.5 ? ` · ${Math.round(o.wave_leaks)} leaked` : ''); }
-                                else if (currentMode === 'boss') { metricLabel = "BOSS TTC"; metricVal = `${(o.boss_ttc ? o.boss_ttc.toFixed(1) : 1800)}s` + ((o.boss_leak_pct || 0) > 0.5 ? ` · ${Math.round(o.boss_leak_pct)}% leak` : ''); }
+                                else if (currentMode === 'wave') { metricLabel = "WAVE TTC (PENALIZED)"; metricVal = `${(o.wave_ttc ? o.wave_ttc.toFixed(1) : 1800)}s` + ((o.wave_leaks || 0) > 0.5 ? ` · ${Math.round(o.wave_leaks)} leaked (raw ${(o.wave_ttc_raw ? o.wave_ttc_raw.toFixed(1) : 1800)}s)` : ''); }
+                                else if (currentMode === 'boss') { metricLabel = "BOSS TTC (PENALIZED)"; metricVal = `${(o.boss_ttc ? o.boss_ttc.toFixed(1) : 1800)}s` + ((o.boss_leak_pct || 0) > 0.5 ? ` · ${Math.round(o.boss_leak_pct)}% leak (raw ${(o.boss_ttc_raw ? o.boss_ttc_raw.toFixed(1) : 1800)}s)` : ''); }
                                 else if (currentMode === 'phys_dmg') { metricLabel = "PHYS DPS"; metricVal = Math.round(o.phys_dmg ? o.phys_dmg / 300 : 0).toLocaleString(); }
                                 else if (currentMode === 'arts_dmg') { metricLabel = "ARTS DPS"; metricVal = Math.round(o.arts_dmg ? o.arts_dmg / 300 : 0).toLocaleString(); }
                                 else if (currentMode === 'ele_dmg') { metricLabel = "ELE DPS"; metricVal = Math.round(o.elemental_dmg ? o.elemental_dmg / 300 : 0).toLocaleString(); }
@@ -518,7 +524,9 @@ let currentView = 'general';
                                 else if (currentMode === 'heal_phys') { metricLabel = "PHYS HEAL & MIT"; metricVal = Math.round(o.heal_phys ? o.heal_phys / 300 : 0).toLocaleString(); }
                                 else if (currentMode === 'heal_arts') { metricLabel = "ARTS HEAL & MIT"; metricVal = Math.round(o.heal_arts ? o.heal_arts / 300 : 0).toLocaleString(); }
                                 else if (currentMode === 'heal_ele') { metricLabel = "ELE HEAL & MIT"; metricVal = Math.round(o.heal_ele ? o.heal_ele / 300 : 0).toLocaleString(); }
-                                else if (currentMode === 'support') { metricLabel = "SUPPORT SCORE"; metricVal = (o.support || 0).toFixed(1); }
+                                else if (currentMode === 'buffs') { metricLabel = "BUFF SCORE"; metricVal = (o.buffs || 0).toFixed(1); }
+                                else if (currentMode === 'debuffs') { metricLabel = "DEBUFF SCORE"; metricVal = (o.debuffs || 0).toFixed(1); }
+                                else if (currentMode === 'utility') { metricLabel = "UTILITY SCORE"; metricVal = (o.utility || 0).toFixed(1) + (o.has_summon_kit ? ' · summon slot' : ''); }
                                 else if (currentMode === 'surv') { metricLabel = "SURVIVABILITY"; metricVal = Math.round(o.surv || 0).toLocaleString(); }
                                 else if (currentMode === 'phys_surv') { metricLabel = "PHYS EHP"; metricVal = Math.round(o.phys_surv || 0).toLocaleString(); }
                                 else if (currentMode === 'arts_surv') { metricLabel = "ARTS EHP"; metricVal = Math.round(o.arts_surv || 0).toLocaleString(); }

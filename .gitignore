@@ -20,7 +20,6 @@ myrtle-main/
 # Temporary files & logs
 *.tmp
 *.log
-*.zip
 scratch/
 
 # Operating System files

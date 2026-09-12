@@ -176,6 +176,7 @@ def main():
         ("boss", "Boss"),
         ("ra", "Reclamation Algorithm"),
         ("is", "Integrated Strategies"),
+        ("cc", "Contingency Contract"),
         ("dp", "DP Generators"),
     ]
 
@@ -191,6 +192,9 @@ def main():
         ("heal_arts", "Arts Healing & Mitigation", "Arts Mitig"),
         ("heal_ele", "Elemental Healing", "Ele Heal"),
         ("support", "Support Utility", "Support"),
+        ("buffs", "Buffs", "Buff Score"),
+        ("debuffs", "Debuffs", "Debuff Score"),
+        ("utility", "Utility", "Utility Score"),
         ("surv", "Overall Survivability", "Surv Score"),
         ("phys_surv", "Physical Survivability", "Phys EHP"),
         ("arts_surv", "Arts Survivability", "Arts EHP"),
@@ -250,6 +254,12 @@ def main():
                     return float(item.get("heal_ele", 0)) / 300.0
                 elif sort_metric == "support":
                     return float(item.get("support", 0))
+                elif sort_metric == "buffs":
+                    return float(item.get("buffs", 0))
+                elif sort_metric == "debuffs":
+                    return float(item.get("debuffs", 0))
+                elif sort_metric == "utility":
+                    return float(item.get("utility", 0))
                 elif sort_metric == "surv":
                     return float(item.get("surv", 0))
                 elif sort_metric == "phys_surv":
@@ -279,6 +289,8 @@ def main():
                     m_val = f"{v:,.0f}"
                 elif sort_metric == "support":
                     m_val = f"{float(op.get('support', 0)):,.0f}"
+                elif sort_metric in ["buffs", "debuffs", "utility"]:
+                    m_val = f"{float(op.get(sort_metric, 0)):,.1f}"
                 elif sort_metric in ["surv", "phys_surv", "arts_surv"]:
                     m_val = f"{float(op.get(sort_metric, 0)):,.0f}"
                 elif sort_metric == "dp":

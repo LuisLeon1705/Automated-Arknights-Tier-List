@@ -76,7 +76,7 @@ fn main() {
 
             let mut boss_sim = core::simulation::SimulationEnvironment::new(op.clone(), None, Some(target_stats.clone()));
             // Standard boss benchmark: 100k HP, 1000 DEF, 50 RES
-            let (boss_ttc, boss_leak) = boss_sim.run_boss_sim(100_000.0, 1000.0, 50.0);
+            let (_boss_ttc_raw, boss_ttc, boss_leak) = boss_sim.run_boss_sim(100_000.0, 1000.0, 50.0);
 
             println!("\n  Skill: {}", sk_name);
             println!("    Initial Barrier: {:.1} HP, Skill Barrier: {:.1} HP (Max Cap: {:.1} HP)", init_bar, skill_bar, cap);

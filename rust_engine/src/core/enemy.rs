@@ -248,6 +248,30 @@ pub fn calculate_is_enemy(_data_dir: &str) -> AverageEnemy {
     }
 }
 
+pub fn calculate_cc_enemy(_data_dir: &str) -> AverageEnemy {
+    // Contingency Contract (危机合约 / CC): the single most demanding permanent mode in the
+    // game — squads face a boss plus dense elite waves simultaneously, and players stack "Risk"
+    // hazards that keep buffing enemy DEF/RES/HP/ATK well past a normal Boss encounter. Modeled
+    // here as tougher than both the plain "Boss" category and Integrated Strategies (which only
+    // scales a single elite/boss threat, not a whole hazard-buffed field).
+    AverageEnemy {
+        def: 1300.0,
+        res: 60.0,
+        hp: 110000.0,
+        weight: 7.0,
+        atk: 1600.0,
+        attack_interval: 3.2,
+        dps: 500.0,
+        dodge_phys: 0.05,
+        dodge_arts: 0.05,
+        stun_immune_ratio: 0.9,
+        silence_immune_ratio: 0.97,
+        freeze_immune_ratio: 0.8,
+        sleep_immune_ratio: 0.8,
+        levitate_immune_ratio: 0.8,
+    }
+}
+
 pub fn get_enemy_by_category(data_dir: &str, category: &str) -> AverageEnemy {
     match category.to_ascii_lowercase().as_str() {
         "normal" => calculate_normal_enemy(data_dir),
@@ -255,6 +279,7 @@ pub fn get_enemy_by_category(data_dir: &str, category: &str) -> AverageEnemy {
         "boss" => calculate_boss_enemy(data_dir),
         "ra" => calculate_ra_enemy(data_dir),
         "is" => calculate_is_enemy(data_dir),
+        "cc" => calculate_cc_enemy(data_dir),
         _ => calculate_average_enemy(data_dir),
     }
 }

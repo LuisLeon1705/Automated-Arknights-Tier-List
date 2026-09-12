@@ -3,7 +3,8 @@ mod core;
 
 fn main() {
     let loader = core::data_loader::DataLoader::new("../data");
-    test_operator(&loader, "Ines");
+    test_operator(&loader, "Tragodia");
+    test_operator(&loader, "Eunectes");
 }
 
 fn test_operator(loader: &core::data_loader::DataLoader, name: &str) {
@@ -37,10 +38,26 @@ fn test_operator(loader: &core::data_loader::DataLoader, name: &str) {
         op.change_state(Some(s_idx.to_string()));
 
         let mut sim = core::simulation::SimulationEnvironment::new(op.clone(), None, Some(target_stats.clone()));
+        op.is_skill_active = true;
+        sim.primary_operator.is_skill_active = true;
+        let sr = sim.state_rates();
+        println!("    [state_rates skill-active] atk={:.1} interval={:.2} attacks_per_sec={:.3} shots_per_attack={:.2} dmg_mult={:.3} phys_per_shot={:.1} arts_per_shot={:.1} target_limit={:.1}",
+            sr.atk, 1.0/sr.attacks_per_sec, sr.attacks_per_sec, sr.shots_per_attack, op.damage_multiplier(), sr.phys_per_shot, sr.arts_per_shot, sr.target_limit);
+        println!("    [debug] hits_mult={:.2} branch_id={:?} class_id={:?} active_buffs_with_atk_scale_lo={}",
+            sim.primary_operator.hits_mult(), sim.primary_operator.branch_id_num(), sim.primary_operator.class_id_num(),
+            sim.primary_operator.get_active_buffs().iter().filter(|b| b.stat == "atk_scale_lo").count());
+        println!("    [cc] stun={:.2} frighten={:.2} fear={:.2} slow={:.2} silence={:.2}",
+            sim.primary_operator.calculate_stat("stun_duration"), sim.primary_operator.calculate_stat("frighten_duration"),
+            sim.primary_operator.calculate_stat("fear_duration"), sim.primary_operator.calculate_stat("slow_duration"),
+            sim.primary_operator.calculate_stat("silence_duration"));
+        for b in sim.primary_operator.get_active_buffs() {
+            if b.stat.contains("atk_scale") { println!("      buff: {} = {:?}", b.stat, b.value); }
+        }
+        sim.primary_operator.is_skill_active = false;
         let (_cycle, _burst_end) = sim.cycle_at(avg_enemy.def, avg_enemy.res);
         let (_dmg_t, _heal_t, _dp_t, _dmg_e, _heal_e, dmg_split) = sim.run_5_minute_sim();
-        let (wave_ttc, wave_leaks) = sim.run_wave_sim(avg_enemy.hp, avg_enemy.def, avg_enemy.res);
-        let (boss_ttc, boss_leak) = sim.run_boss_sim(80000.0, 1200.0, 50.0);
+        let (_wave_ttc_raw, wave_ttc, wave_leaks) = sim.run_wave_sim(avg_enemy.hp, avg_enemy.def, avg_enemy.res);
+        let (_boss_ttc_raw, boss_ttc, boss_leak) = sim.run_boss_sim(80000.0, 1200.0, 50.0);
 
         let phys = dmg_split.get("physical").copied().unwrap_or(0.0);
         let arts = dmg_split.get("arts").copied().unwrap_or(0.0);

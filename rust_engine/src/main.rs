@@ -309,6 +309,28 @@ async fn run_simulation_batch(Json(payload): Json<BatchSimulationRequest>) -> im
     Json(serde_json::json!({ "results": results }))
 }
 
+/// Discounts a CC-duration stat (fear/frighten/stun/slow) by the trigger probability of the
+/// SAME source skill/talent, when one exists (Lappland the Decadenza's S1: "浮游单元攻击时有
+/// {prob}%几率使目标恐惧{fear}秒" — a per-hit chance, not a guaranteed proc on every hit).
+/// calculate_stat() has no notion of this and would credit the full duration as unconditional.
+/// Falls back to the plain duration (prob = 1.0) when no matching "prob" buff shares the name.
+fn cc_duration_with_prob(op: &core::models::Operator, stat: &str) -> f64 {
+    let buffs = op.get_active_buffs();
+    let mut total = 0.0f64;
+    for b in &buffs {
+        if b.stat != stat { continue; }
+        let dur = b.value.as_f64().unwrap_or(0.0);
+        if dur <= 0.0 { continue; }
+        let prob = buffs.iter()
+            .find(|pb| pb.name == b.name && pb.stat == "prob")
+            .and_then(|pb| pb.value.as_f64())
+            .filter(|p| *p > 0.0 && *p < 1.0)
+            .unwrap_or(1.0);
+        total = f64::max(total, dur * prob);
+    }
+    total
+}
+
 fn evaluate_single_operator(op_name: &str, _apply_decay: bool, loader: &core::data_loader::DataLoader, avg_enemy: &core::enemy::AverageEnemy, category: &str) -> Option<Vec<Value>> {
     let dummy_op = loader.get_operator(op_name)?;
     
@@ -361,19 +383,19 @@ fn evaluate_single_operator(op_name: &str, _apply_decay: bool, loader: &core::da
             target_stats.insert("weight".to_string(), avg_enemy.weight);
             target_stats.insert("atk".to_string(), avg_enemy.atk);
             target_stats.insert("attack_interval".to_string(), avg_enemy.attack_interval);
-            let is_boss_cat = category == "boss";
+            let is_boss_cat = category == "boss" || category == "cc";
             target_stats.insert("is_boss".to_string(), if is_boss_cat { 1.0 } else { 0.0 });
             
             let mut sim = core::simulation::SimulationEnvironment::new(op.clone(), None, Some(target_stats));
             
             let (_dmg_t, heal_t, _dp_t, _dmg_e, _heal_e, mut dmg_split) = sim.run_5_minute_sim();
-            let (wave_ttc, wave_leaks) = sim.run_wave_sim(avg_enemy.hp, avg_enemy.def, avg_enemy.res);
+            let (wave_ttc_raw, wave_ttc, wave_leaks) = sim.run_wave_sim(avg_enemy.hp, avg_enemy.def, avg_enemy.res);
             let (boss_hp, boss_def, boss_res) = if is_boss_cat {
                 (avg_enemy.hp, avg_enemy.def, avg_enemy.res)
             } else {
                 (80000.0, 1200.0, 50.0)
             };
-            let (boss_ttc, boss_leak_ratio) = sim.run_boss_sim(boss_hp, boss_def, boss_res);
+            let (boss_ttc_raw, boss_ttc, boss_leak_ratio) = sim.run_boss_sim(boss_hp, boss_def, boss_res);
             
             if let Some(phys) = dmg_split.get_mut("physical") {
                 *phys *= 1.0 - avg_enemy.dodge_phys;
@@ -473,6 +495,13 @@ fn evaluate_single_operator(op_name: &str, _apply_decay: bool, loader: &core::da
             total_dp_cost = total_dp_cost.clamp(1.0, 50.0);
             
             let mut support_score = 0.0;
+            // Buffs/Debuffs/Utility: same underlying numbers as support_score, split into the
+            // three categories requested to replace the single catch-all "Support" tab, since
+            // a pure buffer (team ATK/DEF/RES), a pure debuffer (enemy DEF/RES shred, fragile),
+            // and a field-utility operator (DP, block, CC, camo, summon slot cost) don't compare
+            // meaningfully against each other on one axis.
+            let mut buff_score = 0.0;
+            let mut debuff_score = 0.0;
             let mut heal_phys_mitigation = 0.0;
             let mut heal_arts_mitigation = 0.0;
             let mut heal_ele_mitigation = 0.0;
@@ -490,18 +519,43 @@ fn evaluate_single_operator(op_name: &str, _apply_decay: bool, loader: &core::da
                 0.0
             };
 
+            // Some kits mention "友方" only to state a PRESENCE/COUNT CONDITION that gates a
+            // SELF buff ("当周围没有其他友方单位时，攻击力+8%" / "若有2个及以上友方单位，维娜
+            // 技力回复速度+X" — Ceobe, Scavenger, Vina Victoria), not to grant the stat to
+            // those allies. A bare `desc.contains("友方")` treats these as team-wide buffs.
+            // Detect: every "友方" occurrence sits right after a condition marker (若/当/没有/
+            // a digit or Chinese numeral counting units) or right before "时" closing the clause.
+            let ally_mentions_are_condition_only = |desc: &str| -> bool {
+                let mut idx = 0usize;
+                let mut found_any = false;
+                let mut all_conditional = true;
+                while let Some(pos) = desc[idx..].find("友方") {
+                    let abs = idx + pos;
+                    found_any = true;
+                    let before_tail: String = desc[..abs].chars().rev().take(10).collect::<Vec<_>>().into_iter().rev().collect();
+                    let after_head: String = desc[abs..].chars().take(8).collect();
+                    let is_conditional = before_tail.contains('若') || before_tail.contains('当') || before_tail.contains("没有")
+                        || before_tail.chars().any(|c| c.is_ascii_digit() || "一二三四五六七八九十".contains(c))
+                        || after_head.contains('时');
+                    if !is_conditional { all_conditional = false; }
+                    idx = abs + "友方".len();
+                }
+                found_any && all_conditional
+            };
+
             // Check whether a buff realistically applies to allies based on stat & description
             let is_ally_buff = |st: &str, desc: &str, is_app: bool| -> bool {
                 if is_app { return true; }
+                if ally_mentions_are_condition_only(desc) { return false; }
                 match st {
                     "def" => {
-                        desc.contains("友方单位防御力") || desc.contains("友军防御力") || desc.contains("目标防御力") 
-                        || desc.contains("鼓舞") || desc.contains("友方单位的防御力") || desc.contains("所有友方单位防御力") 
+                        desc.contains("友方单位防御力") || desc.contains("友军防御力") || desc.contains("目标防御力")
+                        || desc.contains("鼓舞") || desc.contains("友方单位的防御力") || desc.contains("所有友方单位防御力")
                         || desc.contains("落点和周围8格的友方单位防御力") || (desc.contains("所有友方") && desc.contains("防御力"))
                     },
                     "magic_resistance" | "res" | "prob" | "arts_dodge" => {
-                        desc.contains("友方单位法术抗性") || desc.contains("友方法术抗性") || desc.contains("目标法术抗性") 
-                        || desc.contains("友方单位的法术抗性") || desc.contains("法术闪避") 
+                        desc.contains("友方单位法术抗性") || desc.contains("友方法术抗性") || desc.contains("目标法术抗性")
+                        || desc.contains("友方单位的法术抗性") || desc.contains("法术闪避")
                         || (desc.contains("友方") && (desc.contains("法术抗性") || desc.contains("法术闪避")))
                     },
                     "damage_resistance" | "damage_resistance_scale" | "sanctuary" | "damage_reduction" | "phys_dmg_red" => {
@@ -557,12 +611,13 @@ fn evaluate_single_operator(op_name: &str, _apply_decay: bool, loader: &core::da
                 }
             }
             if sanc_base > 0.0 {
-                let avg_sanc = f64::min(0.85, (sanc_base * (1.0 - uptime)) + (sanc_base * sanc_scale * uptime));
+                let avg_sanc = f64::min(0.85, ((sanc_base * (1.0 - uptime)) + (sanc_base * sanc_scale * uptime)) * op.sanctuary_hp_gate_factor());
                 let sanc_mit = avg_sanc * 1500.0 * 300.0;
                 heal_phys_mitigation += sanc_mit;
                 heal_arts_mitigation += sanc_mit;
                 heal_ele_mitigation += sanc_mit;
                 support_score += avg_sanc * 800.0;
+                buff_score += avg_sanc * 800.0;
             }
 
             for (b, is_skill) in &provided_buffs {
@@ -572,38 +627,40 @@ fn evaluate_single_operator(op_name: &str, _apply_decay: bool, loader: &core::da
                 
                 match b.stat.as_str() {
                     "atk" => {
-                        if b.buff_type == "ratio" || ((b.buff_type == "blackboard" || b.buff_type.is_empty()) && raw_val <= 2.5) { support_score += val * 300.0; } else { support_score += val * 0.3; }
+                        let add = if b.buff_type == "ratio" || ((b.buff_type == "blackboard" || b.buff_type.is_empty()) && raw_val <= 2.5) { val * 300.0 } else { val * 0.3 };
+                        support_score += add; buff_score += add;
                     },
-                    "aspd" | "attack_speed" => support_score += val * 3.0,
+                    "aspd" | "attack_speed" => { support_score += val * 3.0; buff_score += val * 3.0; },
                     "hp" | "max_hp" => {
-                        if b.buff_type == "ratio" || ((b.buff_type == "blackboard" || b.buff_type.is_empty()) && raw_val <= 2.5) { support_score += val * 300.0; } else { support_score += val * 0.3; }
+                        let add = if b.buff_type == "ratio" || ((b.buff_type == "blackboard" || b.buff_type.is_empty()) && raw_val <= 2.5) { val * 300.0 } else { val * 0.3 };
+                        support_score += add; buff_score += add;
                     },
                     "def" => {
                         if b.buff_type == "ratio" || raw_val <= 2.5 {
                             let mit = val * 500.0 * 3.0 * 300.0 * 0.5;
                             heal_phys_mitigation += mit;
-                            support_score += val * 250.0;
+                            support_score += val * 250.0; buff_score += val * 250.0;
                         } else {
                             let mit = val * 3.0 * 300.0 * 0.8;
                             heal_phys_mitigation += mit;
-                            support_score += val * 1.0;
+                            support_score += val * 1.0; buff_score += val * 1.0;
                         }
                     },
                     "magic_resistance" | "res" => {
                         if b.buff_type == "ratio" || raw_val <= 2.5 {
                             let mit = (val * 15.0 * 0.01) * 1500.0 * 300.0;
                             heal_arts_mitigation += mit;
-                            support_score += val * 300.0;
+                            support_score += val * 300.0; buff_score += val * 300.0;
                         } else {
                             let mit = (val * 0.01) * 1500.0 * 300.0;
                             heal_arts_mitigation += mit;
-                            support_score += val * 10.0;
+                            support_score += val * 10.0; buff_score += val * 10.0;
                         }
                     },
                     "prob" | "arts_dodge" => {
                         let mit = val * 1500.0 * 300.0;
                         heal_arts_mitigation += mit;
-                        support_score += val * 500.0;
+                        support_score += val * 500.0; buff_score += val * 500.0;
                     },
                     "ep_damage_resistance" => {
                         let boost = if op.name.contains("Eyjafjalla") && op.equipped_skill.as_ref().map(|s| s.name.contains("火山回响") || s.name.contains("Volcanic Echoes")).unwrap_or(false) {
@@ -614,44 +671,58 @@ fn evaluate_single_operator(op_name: &str, _apply_decay: bool, loader: &core::da
                         let eff_res = f64::min(0.80, raw_val * boost * mult);
                         let mit = eff_res * 1000.0 * 300.0;
                         heal_ele_mitigation += mit;
-                        support_score += eff_res * 600.0;
+                        support_score += eff_res * 600.0; buff_score += eff_res * 600.0;
                     },
-                    "sp_recovery" => support_score += val * 150.0,
+                    "sp_recovery" => { support_score += val * 150.0; buff_score += val * 150.0; },
                     "target_limit" => support_score += val * 20.0,
                     "talent_multiplier" => support_score += val * 10.0,
-                    "fragile" => support_score += val * 500.0,
-                    "arts_fragile" => support_score += val * 400.0,
-                    "elemental_fragile" => support_score += val * 350.0,
-                    "healing_received_bonus" => support_score += val * 100.0,
+                    "fragile" => { support_score += val * 500.0; debuff_score += val * 500.0; },
+                    "arts_fragile" => { support_score += val * 400.0; debuff_score += val * 400.0; },
+                    "elemental_fragile" => { support_score += val * 350.0; debuff_score += val * 350.0; },
+                    "healing_received_bonus" => { support_score += val * 100.0; buff_score += val * 100.0; },
                     _ => {}
                 }
             }
 
             if dummy_op.char_id.as_deref().unwrap_or("").contains("char_179_cgbird") || op.name == "Nightingale" {
                 heal_arts_mitigation += 48000.0;
-                support_score += 150.0;
+                support_score += 150.0; buff_score += 150.0;
             }
-            
+
             let (flat_def, ratio_def) = op.target_def_debuffs();
-            support_score += flat_def.abs() * 1.0;
-            support_score += ratio_def.abs() * 1500.0;
-            
+            support_score += flat_def.abs() * 1.0; debuff_score += flat_def.abs() * 1.0;
+            support_score += ratio_def.abs() * 1500.0; debuff_score += ratio_def.abs() * 1500.0;
+
             let (flat_res, ratio_res) = op.target_res_debuffs();
-            support_score += flat_res.abs() * 20.0;
-            support_score += ratio_res.abs() * 2000.0;
-            
-            support_score += op.fragile().abs() * 1500.0;
-            support_score += op.arts_fragile().abs() * 1200.0;
-            support_score += op.elemental_fragile().abs() * 1100.0;
-            
-            if silence > 0.0 { support_score += (silence / 5.0) * 30.0 * (1.0 - avg_enemy.silence_immune_ratio); }
-            if op.calculate_stat("stun_duration") > 0.0 { support_score += (op.calculate_stat("stun_duration") / 2.0) * 25.0 * (1.0 - avg_enemy.stun_immune_ratio); }
-            if op.calculate_stat("frighten_duration") > 0.0 { support_score += (op.calculate_stat("frighten_duration") / 2.0) * 30.0; }
-            if op.calculate_stat("fear_duration") > 0.0 { support_score += (op.calculate_stat("fear_duration") / 3.0) * 20.0; }
-            if op.calculate_stat("slow_duration") > 0.0 { support_score += (op.calculate_stat("slow_duration") / 3.0) * 20.0; }
-            
+            support_score += flat_res.abs() * 20.0; debuff_score += flat_res.abs() * 20.0;
+            support_score += ratio_res.abs() * 2000.0; debuff_score += ratio_res.abs() * 2000.0;
+
+            support_score += op.fragile().abs() * 1500.0; debuff_score += op.fragile().abs() * 1500.0;
+            support_score += op.arts_fragile().abs() * 1200.0; debuff_score += op.arts_fragile().abs() * 1200.0;
+            support_score += op.elemental_fragile().abs() * 1100.0; debuff_score += op.elemental_fragile().abs() * 1100.0;
+
+            let target_aspd_debuff = op.calculate_stat("target_aspd_debuff");
+            if target_aspd_debuff > 0.0 { let add = target_aspd_debuff * 5.0; support_score += add; debuff_score += add; }
+
+            // Frighten and Fear have no dedicated immunity stat in the enemy dataset, but both
+            // are "hard CC" (the enemy stops acting) exactly like Stun, so `stun_immune_ratio` is
+            // reused as the closest verified proxy for them too — this makes their contribution
+            // to the Debuff score correctly shrink against tougher (Elite/Boss) enemy tiers
+            // instead of staying constant regardless of target.
+            if silence > 0.0 { let add = (silence / 5.0) * 30.0 * (1.0 - avg_enemy.silence_immune_ratio); support_score += add; debuff_score += add; }
+            let stun_dur = cc_duration_with_prob(&op, "stun_duration");
+            if stun_dur > 0.0 { let add = (stun_dur / 2.0) * 25.0 * (1.0 - avg_enemy.stun_immune_ratio); support_score += add; debuff_score += add; }
+            let frighten_dur = cc_duration_with_prob(&op, "frighten_duration");
+            if frighten_dur > 0.0 { let add = (frighten_dur / 2.0) * 30.0 * (1.0 - avg_enemy.stun_immune_ratio); support_score += add; debuff_score += add; }
+            let fear_dur = cc_duration_with_prob(&op, "fear_duration");
+            if fear_dur > 0.0 { let add = (fear_dur / 3.0) * 20.0 * (1.0 - avg_enemy.stun_immune_ratio); support_score += add; debuff_score += add; }
+            let slow_dur = cc_duration_with_prob(&op, "slow_duration");
+            if slow_dur > 0.0 { let add = (slow_dur / 3.0) * 20.0; support_score += add; debuff_score += add; }
+
             if op.is_skill_active && op.equipped_skill.as_ref().map(|s| s.is_global).unwrap_or(false) {
                 support_score *= 2.0;
+                buff_score *= 2.0;
+                debuff_score *= 2.0;
             }
             
             let mut eff_score = 0.0;
@@ -709,12 +780,17 @@ fn evaluate_single_operator(op_name: &str, _apply_decay: bool, loader: &core::da
                 }
             }
             
+            // heal_phys/arts/ele_mitigation are the SAME damage-resistance/dodge/sanctuary
+            // value re-expressed three times, once per incoming-damage type (each is its own
+            // display metric under heal_phys/heal_arts/heal_ele). Summing all three into the
+            // aggregate score would triple-count one defensive effect; average them instead so
+            // a Sanctuary/dodge buff counts once, at the same magnitude a mitigation-only
+            // operator would show in any single channel.
+            let mitigation_avg = (heal_phys_mitigation + heal_arts_mitigation + heal_ele_mitigation) / 3.0;
             let effective_heal = if is_team_healer {
-                final_heal 
-                    + total_elemental_heal 
-                    + heal_phys_mitigation 
-                    + heal_arts_mitigation 
-                    + heal_ele_mitigation
+                final_heal
+                    + total_elemental_heal
+                    + mitigation_avg
             } else {
                 0.0
             };
@@ -738,9 +814,12 @@ fn evaluate_single_operator(op_name: &str, _apply_decay: bool, loader: &core::da
             total_score += ele_heal_score * 1.5;
             
             let field_block = op.total_field_block();
-            if op.is_defender() {
+            if op.is_defender() && !op.is_duelist() {
                 if field_block < 2.0 {
-                    // 1-block Defender penalty: cannot hold multi-target lanes or weight >= 2 mob swarms
+                    // 1-block Defender penalty: cannot hold multi-target lanes or weight >= 2 mob swarms.
+                    // Duelists (Eunectes, etc.) are excluded: their 1-block is an intentional archetype
+                    // trade-off for much higher personal stats, not a flaw to penalize like a mispositioned
+                    // standard Defender.
                     let block_deficit = 3.0 - field_block;
                     total_score -= block_deficit * 300.0;
                 } else if field_block > 3.0 {
@@ -761,6 +840,11 @@ fn evaluate_single_operator(op_name: &str, _apply_decay: bool, loader: &core::da
             } else if category == "is" {
                 // Integrated Strategies values burst execution and CC scaling
                 total_score += (max_burst / 300.0) * 0.4 + niche_score * 30.0;
+            } else if category == "cc" {
+                // Contingency Contract: hazard-buffed field means burst against the few
+                // high-value threats and control to survive/lock them down both matter more
+                // than in a standard run.
+                total_score += (max_burst / 300.0) * 0.5 + niche_score * 25.0;
             }
             
             let module_tag = if let Some(m) = &op.active_module {
@@ -793,6 +877,19 @@ fn evaluate_single_operator(op_name: &str, _apply_decay: bool, loader: &core::da
                 Some(2) => "S3".to_string(),
                 Some(i) => format!("S{}", i + 1),
             };
+
+            // Utility: field-control/economy value that isn't a team buff or an enemy debuff —
+            // DP generation, block/CC access (niche_score already covers camo, push/pull, status
+            // resistance, CC durations). Kits built around a summon occupy an extra deployment
+            // slot for the summon's lifetime — real opportunity cost the DPS/support numbers
+            // don't capture — but no operator in this dataset has structured summon stats to
+            // size that cost directly, so `has_summon_kit` is only recorded here (via kit text)
+            // and the actual penalty is applied later against the population's average utility
+            // score (see the percentile-scoring loop), the same way every other stat is judged
+            // relative to the roster instead of a fixed constant.
+            let has_summon_kit = dummy_op.talents.iter().any(|t| t.description.contains("召唤"))
+                || dummy_op.skills.iter().any(|s| s.description.contains("召唤"));
+            let utility_score = (niche_score * 50.0) + (total_dp_generated / 300.0 * 10.0);
 
             configs.push(serde_json::json!({
                 "operator_name": op.name.clone(),
@@ -832,6 +929,10 @@ fn evaluate_single_operator(op_name: &str, _apply_decay: bool, loader: &core::da
                 "dp_cost": total_dp_cost,
                 "total_dp_cost": total_dp_cost,
                 "support": support_score,
+                "buffs": buff_score,
+                "debuffs": debuff_score,
+                "utility": utility_score,
+                "has_summon_kit": has_summon_kit,
                 "niche": niche_score,
                 "efficiency": eff_score,
                 "total_score": total_score,
@@ -843,8 +944,10 @@ fn evaluate_single_operator(op_name: &str, _apply_decay: bool, loader: &core::da
                 "heal_arts_mitigation": heal_arts_mitigation,
                 "heal_ele_mitigation": heal_ele_mitigation,
                 "wave_ttc": wave_ttc,
+                "wave_ttc_raw": wave_ttc_raw,
                 "wave_leaks": wave_leaks,
                 "boss_ttc": boss_ttc,
+                "boss_ttc_raw": boss_ttc_raw,
                 "boss_leak_pct": boss_leak_ratio * 100.0,
             }));
 
@@ -909,7 +1012,11 @@ async fn get_tierlist_data(Query(q): Query<TierlistDataQuery>) -> impl IntoRespo
         return Json(serde_json::json!({ "general": [], "detailed": [] }));
     }
     
-    let keys = vec!["niche", "support", "score_true_dmg", "score_elemental_dmg", "weakness_dmg", "ele_heal", "dp", "heal", "surv", "block", "score_arts_dmg", "score_phys_dmg", "potential_aoe", "efficiency", "max_burst"];
+    // "support" is intentionally excluded here: buff_score/debuff_score are its exact split
+    // components, so keeping "support" in this list would score the same underlying value
+    // twice (once whole, once split) in the composite score. The "support" JSON field itself
+    // is kept for the CSV export / legacy readers, just not used for ranking anymore.
+    let keys = vec!["niche", "buffs", "debuffs", "utility", "score_true_dmg", "score_elemental_dmg", "weakness_dmg", "ele_heal", "dp", "heal", "surv", "block", "score_arts_dmg", "score_phys_dmg", "potential_aoe", "efficiency", "max_burst"];
     
     let n_total = all_configs.len() as f64;
     let mut stat_stats = HashMap::new();
@@ -936,6 +1043,20 @@ async fn get_tierlist_data(Query(q): Query<TierlistDataQuery>) -> impl IntoRespo
     }
     let avg_dp_cost = if n_total > 0.0 { total_dp_sum / n_total } else { 1.0 };
     
+    // Arknights fields 8-12 operators out of a roster, not 1 — so a kit that maximizes a SINGLE
+    // axis (Wiš'adel/Lemuen on armor shred, Lappland the Decadenza on pure arts DPS, Hoshiguma
+    // the Breacher on survivability) earns its slot more reliably than one that's merely
+    // "decent" across many axes, because the team can stack multiple specialists to cover what
+    // a generalist would otherwise "cover a bit of everything". The old linear
+    // `w_perf * (val/avg)` sum let exactly that kind of Swiss-army-knife operator (Skadi,
+    // Eunectes) climb the tier list just by being modestly above average in MANY categories at
+    // once, since those small edges added up the same as one category's real dominance. Raising
+    // the ratio to a power > 1 fixes that without retuning any weight: at val==avg the ratio is
+    // 1 and 1^k==1, so an average performance in a category scores exactly the same as before;
+    // above-average ratios grow superlinearly (rewarding real specialization) while
+    // below-average ratios shrink superlinearly (breadth of "fine, not great" stops being free).
+    const SPECIALIZATION_EXPONENT: f64 = 1.5;
+
     for c in &mut all_configs {
         let mut base_score = 0.0;
         if let Some(obj) = c.as_object_mut() {
@@ -965,13 +1086,31 @@ async fn get_tierlist_data(Query(q): Query<TierlistDataQuery>) -> impl IntoRespo
                 } else if *key == "support" {
                     w_rarity = 4.0;
                     w_perf = 16.0;
+                } else if *key == "buffs" || *key == "debuffs" {
+                    w_rarity = 4.0;
+                    w_perf = 16.0;
+                } else if *key == "utility" {
+                    w_rarity = 3.0;
+                    w_perf = 10.0;
                 }
                 
                 let rarity_score = w_rarity * (1.0 - p);
-                let perf_score = w_perf * (val / avg);
+                let ratio = (val / avg).max(0.0);
+                let perf_score = w_perf * ratio.powf(SPECIALIZATION_EXPONENT);
                 base_score += rarity_score + perf_score;
             }
-            
+
+            // Summon-kit slot cost: instead of a fixed constant, charge the same weighted
+            // contribution an operator with exactly AVERAGE utility would have earned (w_perf
+            // * 1.0, using the "utility" weight above) — the deployment slot the summon
+            // occupies could otherwise have held an average-utility operator. This scales
+            // automatically with the roster's actual utility average/weighting instead of a
+            // magic number, so it stays correct as more operators are added.
+            if obj.get("has_summon_kit").and_then(|v| v.as_bool()).unwrap_or(false) {
+                let utility_w_perf = if category == "dp" { 3.0 } else { 10.0 };
+                base_score -= utility_w_perf;
+            }
+
             let op_total_dp = obj.get("total_dp_cost").and_then(|v| v.as_f64()).unwrap_or(avg_dp_cost).max(1.0);
             let cost_penalty_ratio = if avg_dp_cost > 0.0 { (op_total_dp / avg_dp_cost).clamp(0.1, 4.0) } else { 1.0 };
             let dp_penalty_value = 25.0 * cost_penalty_ratio;
@@ -1021,11 +1160,7 @@ async fn get_tierlist_data(Query(q): Query<TierlistDataQuery>) -> impl IntoRespo
             sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
         }).unwrap();
         
-        let mut gen_entry = best.clone();
-        if let Some(obj) = gen_entry.as_object_mut() {
-            obj.insert("skill_name".to_string(), serde_json::json!("Peak Performance"));
-            obj.insert("module_name".to_string(), serde_json::json!("Peak Performance"));
-        }
+        let gen_entry = best.clone();
         general_tierlist.push(gen_entry);
     }
     
