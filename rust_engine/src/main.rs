@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 use rayon::prelude::*;
 use axum::{
-    extract::{Path, Query},
+    extract::{Path, Query, State},
     response::{Html, IntoResponse},
     routing::{get, post, delete},
     Json, Router,
@@ -15,17 +15,58 @@ use std::collections::HashMap;
 
 mod core;
 
+#[derive(Clone)]
+struct TeamTierlistCache {
+    teams: Vec<Value>,
+    data_signature: u64,
+}
+
+#[derive(Clone)]
+struct AppState {
+    team_tierlist_cache: std::sync::Arc<tokio::sync::RwLock<Option<TeamTierlistCache>>>,
+}
+
+/// A cheap "did the roster change" fingerprint — the operator data files' modified-time plus
+/// their byte length, hashed. Used so the Team Tier List auto-regenerates the next time it's
+/// requested after `data/Automated_Operators.json` (or `operators.json`) changes — e.g. after
+/// new operators are added or the Operator Editor saves an edit — instead of silently serving a
+/// stale cache forever until someone remembers to hit Recalculate.
+fn operators_data_signature() -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for path in ["../data/Automated_Operators.json", "../data/operators.json"] {
+        if let Ok(meta) = std::fs::metadata(path) {
+            meta.len().hash(&mut hasher);
+            if let Ok(modified) = meta.modified() {
+                modified.hash(&mut hasher);
+            }
+        }
+    }
+    hasher.finish()
+}
+
 #[tokio::main]
 async fn main() {
+    let state = AppState {
+        team_tierlist_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+    };
+
     let app = Router::new()
         .nest_service("/static", ServeDir::new("../static"))
         .route("/", get(read_root))
+        .route("/compare", get(comparisons_view))
         .route("/editor", get(operator_editor))
         .route("/tierlist", get(tierlist_view))
+        .route("/teams", get(teams_view))
+        .route("/api/team_score", post(get_team_score))
+        .route("/api/team_tierlist", get(get_team_tierlist))
+        .route("/api/team_tierlist/recalculate", post(recalculate_team_tierlist))
         .route("/enemy_tierlist", get(enemy_tierlist_view))
         .route("/api/enemy_tierlist_data", get(get_enemy_tierlist_data))
         .route("/api/tierlist/export", get(export_tierlist_csv))
-        .route("/api/tierlist/export_pdfs_zip", get(download_tierlists_pdf_zip))
+        .route("/api/tierlist/export_all", get(export_tierlist_csv_all))
+        .route("/api/enemy_tierlist/export", get(export_enemy_tierlist_csv))
+        .route("/api/enemy_tierlist/export_all", get(export_enemy_tierlist_csv_all))
         .route("/api/simulate_batch", post(run_simulation_batch))
         .route("/api/tierlist_data", get(get_tierlist_data))
         .route("/api/operators", get(get_operators))
@@ -35,7 +76,8 @@ async fn main() {
         .route("/enemy_editor", get(enemy_editor_view))
         .route("/api/enemies", get(get_enemies))
         .route("/api/enemies/save", post(save_enemy))
-        .route("/api/enemies/{id}", delete(delete_enemy));
+        .route("/api/enemies/{id}", delete(delete_enemy))
+        .with_state(state);
 
     // Allow overriding the port with the PORT environment variable for flexibility.
     let port = std::env::var("PORT").unwrap_or_else(|_| "8000".to_string());
@@ -64,12 +106,75 @@ async fn main() {
 
 async fn read_root() -> impl IntoResponse {
     let loader = core::data_loader::DataLoader::new("../data");
-    let operators = loader.operators_raw.get("operators").cloned().unwrap_or(serde_json::json!([]));
-    
+    let operators = loader.operators_raw.get("operators").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    // Dedupe by name (e.g. Amiya has 3 raw entries for her alternate combat forms, but is a
+    // single roster slot / operator in-game and in the tier list's name-keyed lookups) so this
+    // count matches what the tier list actually displays.
+    let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let operators: Vec<&Value> = operators.iter()
+        .filter(|op| !core::data_loader::is_excluded_operator(op))
+        .filter(|op| seen_names.insert(op.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string()))
+        .collect();
+
+    let total_operators = operators.len();
+    let mut by_rarity_map: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+    let mut by_profession_map: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    for op in &operators {
+        let r = op.get("rarity").and_then(|v| v.as_i64()).unwrap_or(0);
+        *by_rarity_map.entry(r).or_insert(0) += 1;
+        let p = op.get("profession").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if !p.is_empty() { *by_profession_map.entry(p).or_insert(0) += 1; }
+    }
+    // Pre-order into fixed (label, file, count) rows so the template does plain iteration
+    // instead of map lookups (JSON object keys are always strings, which would silently
+    // mismatch an integer rarity index in the template).
+    let rarity_count_6 = *by_rarity_map.get(&6).unwrap_or(&0);
+    let by_rarity: Vec<(i64, i64)> = vec![6, 5, 4, 3, 2, 1].into_iter()
+        .map(|r| (r, *by_rarity_map.get(&r).unwrap_or(&0)))
+        .collect();
+    let class_order = [
+        ("PIONEER", "pioneer", "Vanguard"), ("WARRIOR", "warrior", "Guard"),
+        ("TANK", "tank", "Defender"), ("SNIPER", "sniper", "Sniper"),
+        ("CASTER", "caster", "Caster"), ("MEDIC", "medic", "Medic"),
+        ("SUPPORT", "support", "Supporter"), ("SPECIAL", "special", "Specialist"),
+    ];
+    let by_profession: Vec<(&str, &str, i64)> = class_order.iter()
+        .map(|(prof, file, label)| (*label, *file, *by_profession_map.get(*prof).unwrap_or(&0)))
+        .collect();
+
+    let enemies_count = std::fs::read_to_string("../data/Automated_Enemies.json")
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<serde_json::Value>>(&s).ok())
+        .map(|v| v.len())
+        .unwrap_or(0);
+
     let mut env = minijinja::Environment::new();
     env.set_loader(minijinja::path_loader("../templates"));
-    
-    let html = env.get_template("dashboard.html").unwrap().render(minijinja::context! {
+
+    let html = env.get_template("home.html").unwrap().render(minijinja::context! {
+        total_operators => total_operators,
+        by_rarity => by_rarity,
+        by_profession => by_profession,
+        rarity_count_6 => rarity_count_6,
+        enemies_count => enemies_count,
+        version => "1"
+    }).unwrap();
+    Html(html)
+}
+
+async fn comparisons_view() -> impl IntoResponse {
+    let loader = core::data_loader::DataLoader::new("../data");
+    let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let operators: Vec<Value> = loader.operators_raw.get("operators").and_then(|v| v.as_array()).cloned().unwrap_or_default()
+        .into_iter()
+        .filter(|op| !core::data_loader::is_excluded_operator(op))
+        .filter(|op| seen_names.insert(op.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string()))
+        .collect();
+
+    let mut env = minijinja::Environment::new();
+    env.set_loader(minijinja::path_loader("../templates"));
+
+    let html = env.get_template("comparisons.html").unwrap().render(minijinja::context! {
         operators => operators,
         version => "1"
     }).unwrap();
@@ -114,57 +219,145 @@ async fn tierlist_view() -> impl IntoResponse {
     Html(html)
 }
 
+/// CSV-escapes a field (wraps in quotes and doubles internal quotes if it contains a comma,
+/// quote, or newline) — operator/skill/module names can contain commas or quotes.
+fn csv_field(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+fn tierlist_csv_header(with_category: bool, metrics: &[(&str, &str, bool, bool)]) -> String {
+    let base = "Rank,Tier,Operator,Skill,Module,Score,Phys DPS,Arts DPS,True DPS,Ele DPS,Wave TTC,Boss TTC,HPS,EHP Phys,Support Value";
+    let mut header = if with_category { format!("Category,{}", base) } else { base.to_string() };
+    for (key, _, _, _) in metrics {
+        header.push_str(&format!(",Rank ({}),Tier ({})", key, key));
+    }
+    header.push('\n');
+    header
+}
+
+fn tier_from_pct(pct: f64) -> &'static str {
+    if pct <= 0.025 { "OP" }
+    else if pct <= 0.11 { "S" }
+    else if pct <= 0.27 { "A" }
+    else if pct <= 0.49 { "B" }
+    else if pct <= 0.71 { "C" }
+    else if pct <= 0.86 { "D" }
+    else if pct <= 0.95 { "E" }
+    else { "F" }
+}
+
+/// (metric key, JSON field it ranks by, ascending?, gated?) — mirrors the Tier List page's own
+/// "RANKING METRIC" dropdown exactly (17 options: `general` plus the other 16), including its two
+/// quirks: `wave`/`boss` sort ascending (lower time-to-clear is better) and `dp` only ranks
+/// operators who actually generate DP (gated = true), matching the page filtering non-generators
+/// out of that view entirely rather than ranking them at the bottom.
+const OPERATOR_RANK_METRICS: &[(&str, &str, bool, bool)] = &[
+    ("general", "score", false, false),
+    ("dp", "dp", false, true),
+    ("wave", "wave_ttc", true, false),
+    ("boss", "boss_ttc", true, false),
+    ("phys_dmg", "phys_dmg", false, false),
+    ("arts_dmg", "arts_dmg", false, false),
+    ("ele_dmg", "elemental_dmg", false, false),
+    ("healing", "heal", false, false),
+    ("heal_phys", "heal_phys", false, false),
+    ("heal_arts", "heal_arts", false, false),
+    ("heal_ele", "heal_ele", false, false),
+    ("buffs", "buffs", false, false),
+    ("debuffs", "debuffs", false, false),
+    ("utility", "utility", false, false),
+    ("surv", "surv", false, false),
+    ("phys_surv", "phys_surv", false, false),
+    ("arts_surv", "arts_surv", false, false),
+];
+
+/// (metric key, JSON field, ascending?, gated?) — mirrors the Enemy Tier List's "RANK BY"
+/// dropdown exactly (8 options). All 8 sort descending (bigger = scarier) with no gating.
+const ENEMY_RANK_METRICS: &[(&str, &str, bool, bool)] = &[
+    ("threat_score", "threat_score", false, false),
+    ("hp", "hp", false, false),
+    ("ehp", "ehp", false, false),
+    ("dps", "dps", false, false),
+    ("atk", "atk", false, false),
+    ("def", "def", false, false),
+    ("res", "res", false, false),
+    ("weight", "weight", false, false),
+];
+
+/// Adds a `Rank_<key>`/`Tier_<key>` pair of columns to every row for each metric, ranking WITHIN
+/// this same `rows` slice — i.e. within whichever single category it already represents. This is
+/// the second axis of the cross-analysis (target category x ranking metric for operators,
+/// threat class x rank-by for enemies): the "_all" exports already vary category per row-group;
+/// this bakes in how each row ranks under every OTHER metric too, all in one file.
+fn annotate_metric_ranks(rows: &mut [Value], metrics: &[(&str, &str, bool, bool)]) {
+    for (key, field, ascending, gated) in metrics {
+        let mut indices: Vec<usize> = (0..rows.len())
+            .filter(|&i| !gated || rows[i].get(*field).and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0)
+            .collect();
+        indices.sort_by(|&a, &b| {
+            let va = rows[a].get(*field).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let vb = rows[b].get(*field).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            if *ascending { va.partial_cmp(&vb) } else { vb.partial_cmp(&va) }.unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let n = indices.len().max(1);
+        for (rank0, idx) in indices.into_iter().enumerate() {
+            let pct = (rank0 + 1) as f64 / n as f64;
+            if let Some(obj) = rows[idx].as_object_mut() {
+                obj.insert(format!("Rank_{}", key), serde_json::json!(rank0 + 1));
+                obj.insert(format!("Tier_{}", key), serde_json::json!(tier_from_pct(pct)));
+            }
+        }
+    }
+}
+
+fn tierlist_csv_row(config: &Value, category: Option<&str>, metrics: &[(&str, &str, bool, bool)]) -> String {
+    let rank = config.get("rank").and_then(|v| v.as_u64()).unwrap_or(0);
+    let tier = config.get("tier").and_then(|v| v.as_str()).unwrap_or("");
+    let op = config.get("operator_name").and_then(|v| v.as_str()).unwrap_or("");
+    let skill = config.get("skill_name").and_then(|v| v.as_str()).unwrap_or("");
+    let module = config.get("module_name").and_then(|v| v.as_str()).unwrap_or("");
+    let score = config.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let phys = config.get("phys_dmg").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let arts = config.get("arts_dmg").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let true_d = config.get("true_dmg").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let ele_d = config.get("elemental_dmg").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let wave = config.get("wave_ttc").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let boss = config.get("boss_ttc").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let heal = config.get("heal").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let phys_surv = config.get("phys_surv").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let support = config.get("support").and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+    let mut base = format!("{},{},{},{},{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2}",
+        rank, tier, csv_field(op), csv_field(skill), csv_field(module), score, phys, arts, true_d, ele_d, wave, boss, heal, phys_surv, support);
+    for (key, _, _, _) in metrics {
+        let mrank = config.get(format!("Rank_{}", key)).and_then(|v| v.as_u64());
+        let mtier = config.get(format!("Tier_{}", key)).and_then(|v| v.as_str()).unwrap_or("");
+        match mrank {
+            Some(r) => base.push_str(&format!(",{},{}", r, mtier)),
+            None => base.push_str(",,"), // gated out of this metric (e.g. no DP generation)
+        }
+    }
+    base.push('\n');
+    match category {
+        Some(cat) => format!("{},{}", cat, base),
+        None => base,
+    }
+}
+
 async fn export_tierlist_csv(Query(q): Query<TierlistDataQuery>) -> impl IntoResponse {
     let category = q.category.as_deref().unwrap_or("general");
     let loader = core::data_loader::DataLoader::new("../data");
-    let target_enemy = core::enemy::get_enemy_by_category("../data", category);
-    
-    let ops = loader.get_all_operator_names();
-    let mut all_configs = Vec::new();
-    
-    use rayon::prelude::*;
-    let configs: Vec<Vec<serde_json::Value>> = ops.par_iter().map(|op_name| {
-        evaluate_single_operator(op_name, true, &loader, &target_enemy, category)
-    }).filter_map(|x| x).collect();
-    
-    for mut conf_list in configs {
-        all_configs.append(&mut conf_list);
+    let (_general, detailed) = compute_tierlist_for_category(&loader, category, true);
+
+    let mut csv = tierlist_csv_header(false, &[]);
+    for config in &detailed {
+        csv.push_str(&tierlist_csv_row(config, None, &[]));
     }
-    
-    all_configs.sort_by(|a, b| {
-        let sa = b.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let sb = a.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    
-    for (i, config) in all_configs.iter_mut().enumerate() {
-        if let Some(obj) = config.as_object_mut() {
-            obj.insert("rank".to_string(), serde_json::json!(i + 1));
-        }
-    }
-    
-    let mut csv = String::from("Rank,Tier,Operator,Skill,Module,Score,Phys DPS,Arts DPS,True DPS,Ele DPS,Wave TTC,Boss TTC,HPS,EHP Phys,Support Value\n");
-    for config in all_configs {
-        let rank = config.get("rank").and_then(|v| v.as_u64()).unwrap_or(0);
-        let tier = config.get("tier").and_then(|v| v.as_str()).unwrap_or("");
-        let op = config.get("operator_name").and_then(|v| v.as_str()).unwrap_or("");
-        let skill = config.get("skill_name").and_then(|v| v.as_str()).unwrap_or("");
-        let module = config.get("module_name").and_then(|v| v.as_str()).unwrap_or("");
-        let score = config.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let phys = config.get("phys_dmg").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let arts = config.get("arts_dmg").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let true_d = config.get("true_dmg").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let ele_d = config.get("elemental_dmg").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let wave = config.get("wave_ttc").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let boss = config.get("boss_ttc").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let heal = config.get("heal").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let phys_surv = config.get("phys_surv").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let support = config.get("support").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        
-        csv.push_str(&format!("{},{},{},{},{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2}\n",
-            rank, tier, op, skill, module, score, phys, arts, true_d, ele_d, wave, boss, heal, phys_surv, support));
-    }
-    
+
     (
         [(axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"arknights_tier_list.csv\""),
          (axum::http::header::CONTENT_TYPE, "text/csv")],
@@ -172,40 +365,114 @@ async fn export_tierlist_csv(Query(q): Query<TierlistDataQuery>) -> impl IntoRes
     )
 }
 
-async fn download_tierlists_pdf_zip() -> impl IntoResponse {
-    let p1 = std::path::Path::new("../data/Arknights_Tier_Lists_PDF.zip");
-    let p2 = std::path::Path::new("./data/Arknights_Tier_Lists_PDF.zip");
+/// All 8 operator target categories × all 17 ranking metrics, in one CSV — the two axes the Tier
+/// List page lets you view live (target category via the category selector, ranking metric via
+/// the "RANKING METRIC" dropdown) are otherwise only ever visible one-at-a-time on screen. A
+/// "Category" column plus a `Rank (metric)`/`Tier (metric)` pair per metric bakes both into every
+/// row, so e.g. you can filter to Category=boss and directly compare a row's Rank(boss) against
+/// its Rank(arts_dmg) to see the specialization/generalist tradeoff the app's own scoring rewards.
+async fn export_tierlist_csv_all() -> impl IntoResponse {
+    let loader = core::data_loader::DataLoader::new("../data");
+    let categories = ["general", "normal", "elite", "boss", "ra", "is", "cc", "dp"];
 
-    let p_final = if p1.exists() { p1 } else { p2 };
-    if !p_final.exists() {
-        let script_path = if std::path::Path::new("../Scripts/generate_tierlist_pdfs.py").exists() {
-            "../Scripts/generate_tierlist_pdfs.py"
-        } else if std::path::Path::new("./Scripts/generate_tierlist_pdfs.py").exists() {
-            "./Scripts/generate_tierlist_pdfs.py"
-        } else if std::path::Path::new("../generate_tierlist_pdfs.py").exists() {
-            "../generate_tierlist_pdfs.py"
-        } else {
-            "./generate_tierlist_pdfs.py"
-        };
-        let _ = std::process::Command::new("python")
-            .arg(script_path)
-            .output();
-    }
-
-    if let Ok(bytes) = std::fs::read(p_final) {
-        return (
-            [
-                (axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"Arknights_Tier_Lists_PDF.zip\""),
-                (axum::http::header::CONTENT_TYPE, "application/zip"),
-            ],
-            bytes,
-        ).into_response();
+    let mut csv = tierlist_csv_header(true, OPERATOR_RANK_METRICS);
+    for category in categories {
+        let (_general, mut detailed) = compute_tierlist_for_category(&loader, category, true);
+        annotate_metric_ranks(&mut detailed, OPERATOR_RANK_METRICS);
+        for config in &detailed {
+            csv.push_str(&tierlist_csv_row(config, Some(category), OPERATOR_RANK_METRICS));
+        }
     }
 
     (
-        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-        "No se pudo generar el archivo ZIP de PDFs",
-    ).into_response()
+        [(axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"arknights_tier_list_all_categories.csv\""),
+         (axum::http::header::CONTENT_TYPE, "text/csv")],
+        csv,
+    )
+}
+
+fn enemy_csv_header(with_category: bool, metrics: &[(&str, &str, bool, bool)]) -> String {
+    let base = "Rank,Tier,Name,Threat Class,Threat Score,EHP,DPS,HP,ATK,DEF,RES,Attack Interval";
+    let mut header = if with_category { format!("Category,{}", base) } else { base.to_string() };
+    for (key, _, _, _) in metrics {
+        header.push_str(&format!(",Rank ({}),Tier ({})", key, key));
+    }
+    header.push('\n');
+    header
+}
+
+fn enemy_csv_row(e: &Value, category: Option<&str>, metrics: &[(&str, &str, bool, bool)]) -> String {
+    let rank = e.get("rank").and_then(|v| v.as_u64()).unwrap_or(0);
+    let tier = e.get("tier").and_then(|v| v.as_str()).unwrap_or("");
+    let name = e.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let tier_type = e.get("tier_type").and_then(|v| v.as_str()).unwrap_or("");
+    let threat = e.get("threat_score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let ehp = e.get("ehp").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let dps = e.get("dps").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let hp = e.get("hp").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let atk = e.get("atk").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let def = e.get("def").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let res = e.get("res").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let interval = e.get("attack_interval").and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+    let mut base = format!("{},{},{},{},{:.0},{:.0},{:.0},{:.0},{:.0},{:.0},{:.1},{:.2}",
+        rank, tier, csv_field(name), tier_type, threat, ehp, dps, hp, atk, def, res, interval);
+    for (key, _, _, _) in metrics {
+        let mrank = e.get(format!("Rank_{}", key)).and_then(|v| v.as_u64());
+        let mtier = e.get(format!("Tier_{}", key)).and_then(|v| v.as_str()).unwrap_or("");
+        match mrank {
+            Some(r) => base.push_str(&format!(",{},{}", r, mtier)),
+            None => base.push_str(",,"),
+        }
+    }
+    base.push('\n');
+    match category {
+        Some(cat) => format!("{},{}", cat, base),
+        None => base,
+    }
+}
+
+#[derive(Deserialize)]
+struct EnemyExportQuery {
+    category: Option<String>,
+}
+
+async fn export_enemy_tierlist_csv(Query(q): Query<EnemyExportQuery>) -> impl IntoResponse {
+    let category = q.category.as_deref().unwrap_or("all");
+    let (enemies, _resolved) = compute_enemy_tierlist(category);
+
+    let mut csv = enemy_csv_header(false, &[]);
+    for e in &enemies {
+        csv.push_str(&enemy_csv_row(e, None, &[]));
+    }
+
+    (
+        [(axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"arknights_enemy_tier_list.csv\""),
+         (axum::http::header::CONTENT_TYPE, "text/csv")],
+        csv,
+    )
+}
+
+/// All 4 enemy threat classes × all 8 "RANK BY" metrics, in one CSV — "all" plus each sub-tier
+/// (Boss/Elite/Normal are each separately re-ranked, percentiles relative to that subset, not the
+/// whole roster), each carrying a `Rank (metric)`/`Tier (metric)` pair for every rank-by metric
+/// the Enemy Tier List page offers, so both axes of the cross-analysis are in one file.
+async fn export_enemy_tierlist_csv_all() -> impl IntoResponse {
+    let categories = ["all", "boss", "elite", "normal"];
+    let mut csv = enemy_csv_header(true, ENEMY_RANK_METRICS);
+    for category in categories {
+        let (mut enemies, _resolved) = compute_enemy_tierlist(category);
+        annotate_metric_ranks(&mut enemies, ENEMY_RANK_METRICS);
+        for e in &enemies {
+            csv.push_str(&enemy_csv_row(e, Some(category), ENEMY_RANK_METRICS));
+        }
+    }
+
+    (
+        [(axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"arknights_enemy_tier_list_all_categories.csv\""),
+         (axum::http::header::CONTENT_TYPE, "text/csv")],
+        csv,
+    )
 }
 
 #[derive(Deserialize)]
@@ -363,7 +630,13 @@ fn evaluate_single_operator(op_name: &str, _apply_decay: bool, loader: &core::da
             }
         }
         
-        for mod_idx in modules_to_test {
+        let is_sakiko_s2 = (dummy_op.name.contains("Sakiko") || dummy_op.is_char("char_4182_oblvns")) && skill_idx == Some(1);
+        // Sakiko's S2 is a switch skill (Piano/Organ stances, same `equipped_skill` but two
+        // distinct damage profiles) — run both stances as separate configs instead of one.
+        let stance_variants: Vec<&str> = if is_sakiko_s2 { vec!["piano", "organ"] } else { vec![""] };
+
+        for stance in &stance_variants {
+        for mod_idx in modules_to_test.clone() {
             let mut op = dummy_op.clone();
             if let Some(si) = skill_idx {
                 op.equipped_skill = Some(op.skills[si].clone());
@@ -371,6 +644,7 @@ fn evaluate_single_operator(op_name: &str, _apply_decay: bool, loader: &core::da
             } else {
                 op.change_state(None);
             }
+            if !stance.is_empty() { op.skill_variant = stance.to_string(); }
             if let Some(mi) = mod_idx {
                 op.active_module = Some(op.modules[mi].clone());
             } else {
@@ -462,12 +736,35 @@ fn evaluate_single_operator(op_name: &str, _apply_decay: bool, loader: &core::da
             if op.calculate_stat("frighten_duration") > 0.0 { niche_score += 1.5; }
             if op.calculate_stat("fear_duration") > 0.0 { niche_score += 1.5; }
             if op.calculate_stat("slow_duration") > 0.0 { niche_score += 1.0; }
-            
+            // "寒冷" (Cold) — SilverAsh the Reignfrost's S2 signature mechanic (and anyone else's
+            // kit using the same blackboard key): 2 stacks converts into a full Frozen lockdown
+            // in-game, but this engine has no separate Frozen-stacking model, so at minimum the
+            // Cold application itself (a real debuff on its own) wasn't credited anywhere at all.
+            if op.calculate_stat("cold") > 0.0 { niche_score += 2.0; }
+            if op.name == "Ines" {
+                // Her talent "影织" roots (束缚) EVERY enemy for 5s the first time she damages
+                // them — not a single-target lock. Across a full wave of enemies that's
+                // functionally near-blanket AoE CC (a new bind on essentially every new target
+                // she hits), not a one-off niche debuff. This engine has no generic "root
+                // duration" stat (only stun/frighten/fear/slow/silence are tracked), so without
+                // this her strongest kit element scored as literally nothing.
+                niche_score += 3.0;
+            }
+
+            // A push/pull force below the target's weight does NOTHING in-game — the enemy just
+            // doesn't move. `f64::max(0.5, force_weight)` used to floor this at a guaranteed
+            // minimum credit even when `pp_force` was far below `avg_enemy.weight` (i.e. the
+            // pull would visibly fail against a real target), crediting force/weight matchups
+            // that flat-out don't work. Floored at 0.0 instead: no margin over the target's
+            // weight means no credit. The overall scale is also cut (0.5 -> 0.25) since even a
+            // genuinely successful push/pull is inherently map- and positioning-dependent (needs
+            // open space behind/around the target) rather than a reliably-usable effect on every
+            // stage, unlike a straightforward CC duration.
             let pp_targets = op.calculate_stat("push_pull_targets");
             let pp_force = op.calculate_stat("push_pull_force");
             if pp_targets > 0.0 {
-                let force_weight = pp_force - avg_enemy.weight + 2.0;
-                niche_score += f64::max(0.5, force_weight) * pp_targets * 0.5;
+                let force_margin = pp_force - avg_enemy.weight;
+                niche_score += force_margin.max(0.0) * pp_targets * 0.25;
             }
             
             let mut has_perm_camo = false;
@@ -718,6 +1015,15 @@ fn evaluate_single_operator(op_name: &str, _apply_decay: bool, loader: &core::da
             if fear_dur > 0.0 { let add = (fear_dur / 3.0) * 20.0 * (1.0 - avg_enemy.stun_immune_ratio); support_score += add; debuff_score += add; }
             let slow_dur = cc_duration_with_prob(&op, "slow_duration");
             if slow_dur > 0.0 { let add = (slow_dur / 3.0) * 20.0; support_score += add; debuff_score += add; }
+            let cold_dur = op.calculate_stat("cold");
+            if cold_dur > 0.0 { let add = (cold_dur / 3.0) * 15.0; support_score += add; debuff_score += add; }
+            if op.name == "Ines" {
+                // Her talent roots EVERY enemy for 5s on first hit — not a single-target lock,
+                // so score it like a hard-CC duration applied broadly across a wave rather than
+                // a one-off proc. See the niche_score comment above for the full explanation.
+                let add = (5.0 / 2.0) * 25.0 * (1.0 - avg_enemy.stun_immune_ratio);
+                support_score += add; debuff_score += add;
+            }
 
             if op.is_skill_active && op.equipped_skill.as_ref().map(|s| s.is_global).unwrap_or(false) {
                 support_score *= 2.0;
@@ -729,7 +1035,39 @@ fn evaluate_single_operator(op_name: &str, _apply_decay: bool, loader: &core::da
             if let Some(s) = &op.equipped_skill {
                 let s_cost = s.sp_cost;
                 let s_dur = s.duration;
-                if s.is_infinite_or_toggle() || s.is_passive() {
+                // Two real false-positive patterns for a blanket "100% uptime" credit:
+                // 1. A skill can say "持续时间无限" (unlimited duration) while actually being a
+                //    self-terminating execute mode, not a sustainable toggle — e.g. Surtr's S3
+                //    "黄昏" ("gradually loses HP... {duration}s until it reaches {hp_ratio}% max
+                //    HP/sec", i.e. an HP-drain skill that runs until it kills her, escalating
+                //    into a real cooldown on repeated deaths). Text says infinite; reality is a
+                //    burst window with a death clock. Detected via the "逐渐流失生命" (gradually
+                //    losing HP) phrase this class of skill consistently uses.
+                // 2. `sp_type == "8"` (is_passive()'s catch-all) assumes ANY such skill is
+                //    always-on, but some are "free deploy trigger, then forced auto-retreat with
+                //    an EXTENDED redeploy time" (e.g. Nearl the Radiant Knight's "逐夜烁光") — the
+                //    opposite of cooldown-free. Detected via "自动撤退" (auto-retreat) + a
+                //    redeploy-time-extension term in the same skill's text.
+                // 3. Executors (Texas the Omertosa, etc.) run entirely on `sp_type == "8"`
+                //    skills too — is_passive() reads that as "always active", but an Executor's
+                //    whole archetype is a kill-chain: the skill only keeps re-triggering while
+                //    she's landing killing blows, and breaking that chain means real idle
+                //    downtime before she can go again. Judge her uptime the same
+                //    duration-vs-redeploy way the Team Builder's per-member override already
+                //    does, instead of a blanket 100 — this was previously ONLY applied there, so
+                //    the base tier list (and anything ranking off it, like Team Builder's swap
+                //    candidate search) still saw every Executor at a false 100%.
+                let is_exec = op.is_executor();
+                let is_death_timer = s.description.contains("流失生命");
+                let is_forced_retreat = s.description.contains("自动撤退") && s.description.contains("再部署时间");
+                if is_exec && s_dur > 0.0 && op.final_redeployment_time() > 0.0 {
+                    eff_score = (s_dur / (s_dur + op.final_redeployment_time())) * 100.0;
+                } else if is_forced_retreat && op.final_redeployment_time() > 0.0 && s_dur > 0.0 {
+                    eff_score = (s_dur / (s_dur + op.final_redeployment_time())) * 100.0;
+                } else if is_death_timer && s_dur > 0.0 {
+                    let uptime_r = s_dur / (s_dur + s_cost.max(1.0));
+                    eff_score = uptime_r * 100.0;
+                } else if s.is_infinite_or_toggle() || s.is_passive() {
                     eff_score = 100.0;
                 } else if s_cost > 0.0 && s_dur > 0.0 {
                     let mut uptime_r = s_dur / (s_dur + s_cost);
@@ -867,12 +1205,15 @@ fn evaluate_single_operator(op_name: &str, _apply_decay: bool, loader: &core::da
                 "NO MOD".to_string()
             };
 
-            let is_sakiko = op.name.contains("Sakiko") || op.is_char("char_4182_oblvns");
             let skill_tag = match skill_idx {
                 None => "RAW".to_string(),
                 Some(0) => "S1".to_string(),
                 Some(1) => {
-                    if is_sakiko { "S2-1".to_string() } else { "S2".to_string() }
+                    if is_sakiko_s2 {
+                        if *stance == "organ" { "S2-2".to_string() } else { "S2-1".to_string() }
+                    } else {
+                        "S2".to_string()
+                    }
                 },
                 Some(2) => "S3".to_string(),
                 Some(i) => format!("S{}", i + 1),
@@ -899,8 +1240,15 @@ fn evaluate_single_operator(op_name: &str, _apply_decay: bool, loader: &core::da
                 "photo_path": dummy_op.photo_path.clone(),
                 "profession": dummy_op.profession.clone(),
                 "subclass_name": dummy_op.subclass_name.clone(),
+                "sub_profession_id": dummy_op.sub_profession_id.clone(),
                 "position": dummy_op.position.clone(),
-                "skill_name": op.equipped_skill.as_ref().map(|s| s.name.clone()).unwrap_or_else(|| "RAW".to_string()),
+                "skill_name": op.equipped_skill.as_ref().map(|s| {
+                    if is_sakiko_s2 {
+                        format!("{} ({})", s.name, if *stance == "organ" { "Organ" } else { "Piano" })
+                    } else {
+                        s.name.clone()
+                    }
+                }).unwrap_or_else(|| "RAW".to_string()),
                 "module_name": op.active_module.as_ref().map(|m| m.name.clone()).unwrap_or_else(|| "No Module".to_string()),
                 "skill_tag": skill_tag,
                 "module_tag": module_tag,
@@ -950,18 +1298,8 @@ fn evaluate_single_operator(op_name: &str, _apply_decay: bool, loader: &core::da
                 "boss_ttc_raw": boss_ttc_raw,
                 "boss_leak_pct": boss_leak_ratio * 100.0,
             }));
-
-            // For Sakiko S2 stance switch: generate S2-2 (Organ mode)
-            if is_sakiko && skill_idx == Some(1) {
-                let mut s2_2_obj = configs.last().unwrap().clone();
-                if let Some(obj) = s2_2_obj.as_object_mut() {
-                    obj.insert("skill_tag".to_string(), serde_json::json!("S2-2"));
-                    let orig_sk = obj.get("skill_name").and_then(|v| v.as_str()).unwrap_or("满月的舞会");
-                    obj.insert("skill_name".to_string(), serde_json::json!(format!("{} (Organ)", orig_sk)));
-                }
-                configs.push(s2_2_obj);
-            }
         }
+        } // stance_variants
     }
     
     Some(configs)
@@ -972,18 +1310,21 @@ struct TierlistDataQuery {
     category: Option<String>,
 }
 
-async fn get_tierlist_data(Query(q): Query<TierlistDataQuery>) -> impl IntoResponse {
-    let category = q.category.as_deref().unwrap_or("general");
-    let loader = core::data_loader::DataLoader::new("../data");
-    let apply_decay = q.apply_decay.unwrap_or(true);
+/// The full per-operator scoring/ranking pass (percentile-relative `score` + OP/S/A/B/C/D/E/F
+/// `tier`) behind `/api/tierlist_data` for one category, extracted so it's callable outside the
+/// HTTP handler too — `compute_team_tierlist_blocking` reuses the per-operator `score` this
+/// produces to pick each class's top 5, instead of re-deriving "is this operator individually
+/// good" from scratch.
+fn compute_tierlist_for_category(loader: &core::data_loader::DataLoader, category: &str, apply_decay: bool) -> (Vec<Value>, Vec<Value>) {
     let target_enemy = core::enemy::get_enemy_by_category("../data", category);
     let raw_ops = loader.operators_raw.get("operators").and_then(|x| x.as_array());
     if raw_ops.is_none() {
-        return Json(serde_json::json!({ "general": [], "detailed": [], "enemy_stats": target_enemy, "category": category }));
+        return (Vec::new(), Vec::new());
     }
     let raw_ops = raw_ops.unwrap();
     let mut all_configs: Vec<_> = raw_ops.par_iter().filter_map(|op_val| {
         if let Some(op_name) = op_val.get("name").and_then(|v| v.as_str()) {
+            if core::data_loader::is_excluded_operator(op_val) { return None; }
             if let Some(mut configs) = evaluate_single_operator(op_name, apply_decay, &loader, &target_enemy, category) {
                 for c in &mut configs {
                     if let Some(obj) = c.as_object_mut() {
@@ -1009,7 +1350,7 @@ async fn get_tierlist_data(Query(q): Query<TierlistDataQuery>) -> impl IntoRespo
     }
 
     if all_configs.is_empty() {
-        return Json(serde_json::json!({ "general": [], "detailed": [] }));
+        return (Vec::new(), Vec::new());
     }
     
     // "support" is intentionally excluded here: buff_score/debuff_score are its exact split
@@ -1080,6 +1421,18 @@ async fn get_tierlist_data(Query(q): Query<TierlistDataQuery>) -> impl IntoRespo
                 } else if *key == "niche" {
                     w_rarity = 5.0;
                     w_perf = 5.0;
+                } else if *key == "dp" {
+                    // Outside the dedicated "DP Generators" category, DP generation still used
+                    // the same default weight as any combat stat (w_perf 8) — badly undervaluing
+                    // it relative to its real impact: Vanguards are close to a mandatory class in
+                    // most game modes because a good one deploys the rest of the 12-operator
+                    // roster almost immediately, a team-wide snowball effect this per-operator
+                    // simulation has no way to measure directly. Weighted the same as the
+                    // dedicated "DP Generators" category itself (36), so General no longer
+                    // structurally buries the entire class behind damage/survivability stats it
+                    // was never meant to compete on.
+                    w_rarity = 4.0;
+                    w_perf = 36.0;
                 } else if *key == "heal" {
                     w_rarity = 4.0;
                     w_perf = 24.0;
@@ -1187,6 +1540,15 @@ async fn get_tierlist_data(Query(q): Query<TierlistDataQuery>) -> impl IntoRespo
         }
     }
     
+    (general_tierlist, all_configs)
+}
+
+async fn get_tierlist_data(Query(q): Query<TierlistDataQuery>) -> impl IntoResponse {
+    let category = q.category.as_deref().unwrap_or("general");
+    let loader = core::data_loader::DataLoader::new("../data");
+    let apply_decay = q.apply_decay.unwrap_or(true);
+    let target_enemy = core::enemy::get_enemy_by_category("../data", category);
+    let (general_tierlist, all_configs) = compute_tierlist_for_category(&loader, category, apply_decay);
     Json(serde_json::json!({
         "general": general_tierlist,
         "detailed": all_configs,
@@ -1198,6 +1560,350 @@ async fn get_tierlist_data(Query(q): Query<TierlistDataQuery>) -> impl IntoRespo
 async fn get_operators() -> impl IntoResponse {
     let loader = core::data_loader::DataLoader::new("../data");
     Json(loader.operators_raw)
+}
+
+async fn teams_view() -> impl IntoResponse {
+    let loader = core::data_loader::DataLoader::new("../data");
+    let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let operators: Vec<Value> = loader.operators_raw.get("operators").and_then(|v| v.as_array()).cloned().unwrap_or_default()
+        .into_iter()
+        .filter(|op| !core::data_loader::is_excluded_operator(op))
+        .filter(|op| seen_names.insert(op.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string()))
+        .collect();
+
+    let mut env = minijinja::Environment::new();
+    env.set_loader(minijinja::path_loader("../templates"));
+
+    let html = env.get_template("teams.html").unwrap().render(minijinja::context! {
+        operators => operators,
+        version => "1"
+    }).unwrap();
+    Html(html)
+}
+
+#[derive(Deserialize)]
+struct TeamMemberSpec {
+    name: String,
+    // `locked: false` (the default — matches a plain `{"name": "..."}`) means fully auto: pick
+    // whichever skill/module combo maximizes `total_score`, same as before this was configurable.
+    // `locked: true` pins the EXACT loadout: `skill_index`/`module_index` of `None` means "RAW"/
+    // "No Module" specifically, not "auto" — a locked choice never falls back to guessing.
+    #[serde(default)]
+    skill_index: Option<usize>,
+    #[serde(default)]
+    module_index: Option<usize>,
+    #[serde(default)]
+    locked: bool,
+}
+
+#[derive(Deserialize)]
+struct TeamScoreRequest {
+    members: Vec<TeamMemberSpec>,
+}
+
+fn team_val(v: &Value, key: &str) -> f64 {
+    v.get(key).and_then(|x| x.as_f64()).unwrap_or(0.0)
+}
+
+fn team_best_config(configs: &[Value]) -> Option<&Value> {
+    configs.iter().max_by(|a, b| {
+        team_val(a, "total_score")
+            .partial_cmp(&team_val(b, "total_score"))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })
+}
+
+/// Finds the config matching a specific (skill_name, module_name) pair — used when the user has
+/// explicitly locked in a skill/module in the Team Builder instead of letting `total_score` pick.
+/// Falls back to the best-by-`total_score` config when no explicit choice was made (both `None`)
+/// or the requested combo isn't found in this category's configs (shouldn't normally happen).
+fn pick_config<'a>(configs: &'a [Value], skill_name: Option<&str>, module_name: Option<&str>) -> Option<&'a Value> {
+    if skill_name.is_none() && module_name.is_none() {
+        return team_best_config(configs);
+    }
+    configs.iter().find(|c| {
+        skill_name.map(|s| c.get("skill_name").and_then(|v| v.as_str()) == Some(s)).unwrap_or(true)
+            && module_name.map(|m| c.get("module_name").and_then(|v| v.as_str()) == Some(m)).unwrap_or(true)
+    }).or_else(|| team_best_config(configs))
+}
+
+/// Builds the cached per-operator snapshot a team score is aggregated from. Runs
+/// `evaluate_single_operator` 3 times (boss/normal/general categories) for a SINGLE operator —
+/// cheap compared to the full-roster scan `/api/tierlist_data` does, since a team has at most 12
+/// members. Lives here (not in `core::team`) because `core` is shared by several standalone
+/// debug/test binaries that don't have `evaluate_single_operator` in their crate root.
+///
+/// `skill_index`/`module_index` (`None` = "RAW"/"No Module", `Some(i)` = that index in
+/// `op.skills`/`op.modules`) let the Team Builder lock in a specific loadout instead of always
+/// taking whichever config maximizes `total_score` — `total_score` has no notion of uptime/
+/// cooldown at all, so for an operator like Pramanix (whose strongest S3 has a much worse
+/// duration-to-cost ratio than her S2) the auto-picked config can systematically understate
+/// Consistency for a real, deliberate loadout choice.
+fn build_member_profile(
+    data_dir: &str, loader: &core::data_loader::DataLoader, name: &str,
+    skill_index: Option<usize>, module_index: Option<usize>, locked: bool,
+) -> Option<core::team::TeamMemberProfile> {
+    let op = loader.get_operator(name)?;
+    // When locked, an unset index means "RAW"/"No Module" EXACTLY, not "auto" — only the
+    // unlocked (both-`None`) case falls through to `pick_config`'s best-by-`total_score` pick.
+    let skill_name: Option<&str> = locked.then(|| {
+        skill_index.and_then(|i| op.skills.get(i)).map(|s| s.name.as_str()).unwrap_or("RAW")
+    });
+    let module_name: Option<&str> = locked.then(|| {
+        module_index.and_then(|i| op.modules.get(i)).map(|m| m.name.as_str()).unwrap_or("No Module")
+    });
+
+    let boss_enemy = core::enemy::get_enemy_by_category(data_dir, "boss");
+    let normal_enemy = core::enemy::get_enemy_by_category(data_dir, "normal");
+    let general_enemy = core::enemy::get_enemy_by_category(data_dir, "general");
+
+    let boss_configs = evaluate_single_operator(name, true, loader, &boss_enemy, "boss")?;
+    let normal_configs = evaluate_single_operator(name, true, loader, &normal_enemy, "normal")?;
+    let general_configs = evaluate_single_operator(name, true, loader, &general_enemy, "general")?;
+
+    let boss_cfg = pick_config(&boss_configs, skill_name, module_name)?;
+    let normal_cfg = pick_config(&normal_configs, skill_name, module_name)?;
+    let general_cfg = pick_config(&general_configs, skill_name, module_name)?;
+
+    // `total_score` (used to pick "best config" above) has no DP-generation term at all — it's
+    // purely damage/heal/surv/support/niche/block/burst — so it never actually favors a
+    // Vanguard's DP-generating skill over their damage skill. For the Deploy Time axis we
+    // specifically want whichever config generates the MOST dp/sec, straight from the same
+    // already-computed general-category configs — UNLESS the user explicitly locked in a
+    // loadout, in which case respect that choice's actual DP output instead of hunting for a
+    // different, unrequested skill/module combo.
+    let dp_cfg = if locked {
+        general_cfg
+    } else {
+        general_configs.iter().max_by(|a, b| {
+            team_val(a, "dp_per_sec").partial_cmp(&team_val(b, "dp_per_sec")).unwrap_or(std::cmp::Ordering::Equal)
+        }).unwrap_or(general_cfg)
+    };
+
+    let boss_dmg_score = team_val(boss_cfg, "score_phys_dmg")
+        + team_val(boss_cfg, "score_arts_dmg")
+        + team_val(boss_cfg, "score_true_dmg")
+        + team_val(boss_cfg, "score_elemental_dmg");
+
+    // Armor penetration: DEF/RES ignore ratio (0..1, direct % mitigation bypassed) plus a small
+    // bonus for flat ignore values, scaled down since a flat number isn't directly comparable to
+    // a ratio — this is a tunable approximation, not a literal in-game formula.
+    let def_ignore = op.def_ignore_ratio().clamp(0.0, 0.95) + (op.def_ignore_flat() / 800.0).min(0.3);
+    let res_ignore = op.res_ignore_ratio().clamp(0.0, 0.95) + (op.res_ignore_flat() / 80.0).min(0.3);
+    let armor_pen = (def_ignore + res_ignore) / 2.0;
+
+    // Consistency: for redeploy-based archetypes (Executors), uptime is better judged as
+    // "active field time vs. redeploy cooldown" rather than "skill duration vs. SP cost" (which
+    // `efficiency` already captures correctly for everyone else).
+    let redeploy_time = op.final_redeployment_time();
+    let is_exec = op.is_executor();
+    let general_skill_name = general_cfg.get("skill_name").and_then(|v| v.as_str()).unwrap_or("RAW");
+    let equipped_duration = op.skills.iter().find(|s| s.name == general_skill_name).map(|s| s.duration).unwrap_or(0.0);
+    let efficiency = if is_exec && equipped_duration > 0.0 && redeploy_time > 0.0 {
+        (equipped_duration / (equipped_duration + redeploy_time) * 100.0).min(100.0)
+    } else {
+        team_val(general_cfg, "efficiency")
+    };
+
+    Some(core::team::TeamMemberProfile {
+        operator_name: op.name.clone(),
+        profession: op.profession.clone(),
+        sub_profession_id: op.sub_profession_id.clone(),
+        rarity: op.rarity as i64,
+        boss_ttc: team_val(boss_cfg, "boss_ttc"),
+        boss_leak_pct: team_val(boss_cfg, "boss_leak_pct"),
+        boss_dmg_score,
+        armor_pen,
+        wave_ttc: team_val(normal_cfg, "wave_ttc"),
+        wave_leaks: team_val(normal_cfg, "wave_leaks"),
+        block: team_val(normal_cfg, "block"),
+        surv: team_val(general_cfg, "surv"),
+        heal: team_val(general_cfg, "heal"),
+        status_resist: op.calculate_stat("status_resistance"),
+        dp_per_sec: team_val(dp_cfg, "dp_per_sec"),
+        dp_cost: team_val(general_cfg, "dp_cost"),
+        efficiency,
+        buffs: team_val(general_cfg, "buffs"),
+        debuffs: team_val(general_cfg, "debuffs"),
+        utility_score: team_val(general_cfg, "utility"),
+    })
+}
+
+/// For a team's single weakest axis, ranks every roster operator NOT already on the team by a
+/// per-axis metric read straight off the general-category tier list (already-computed fields,
+/// no extra simulation) and returns the top 3 names — candidates who are actually strong in
+/// exactly the area the team is lacking, not just "good overall".
+/// `profession_counts_after_removal` is the team's class distribution AFTER the swapped-out
+/// member is gone — used to skip any candidate whose class is already at team.rs's own "no more
+/// than 3 of one class" soft cap (`role_balance`/`role_balance_multiplier`). Without this, a
+/// candidate can top the single axis being searched for and still tank the overall score on
+/// arrival by tripping that penalty — recommending a fix that makes the team worse overall.
+/// `excluded_names` are operators that shouldn't show up in a "recommended pick" at all —
+/// currently anything sharing a name with an `is_excluded_operator` raw entry (special-mode-only
+/// operators like Reclamation Algorithm exclusives, e.g. Tulip's RA-only 6★ record).
+fn axis_swap_candidates(
+    general_rows: &[Value], team_names: &std::collections::HashSet<String>, axis: &str,
+    profession_counts_after_removal: &HashMap<String, i32>, excluded_names: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let mut candidates: Vec<(&Value, f64)> = general_rows.iter()
+        .filter(|r| {
+            let name = r.get("operator_name").and_then(|v| v.as_str()).unwrap_or("");
+            if name.is_empty() || team_names.contains(name) || excluded_names.contains(name) { return false; }
+            let prof = r.get("profession").and_then(|v| v.as_str()).unwrap_or("");
+            if axis == "deploy_speed" && prof != "PIONEER" { return false; }
+            profession_counts_after_removal.get(prof).copied().unwrap_or(0) < 3
+        })
+        .map(|r| {
+            let metric = match axis {
+                "boss_killing" => {
+                    let dmg = team_val(r, "score_phys_dmg") + team_val(r, "score_arts_dmg") + team_val(r, "score_true_dmg") + team_val(r, "score_elemental_dmg");
+                    dmg / team_val(r, "boss_ttc").max(1.0)
+                }
+                "lane_holding" => (team_val(r, "block") + 1.0) / team_val(r, "wave_ttc").max(1.0) * 300.0,
+                "resistance" => team_val(r, "surv") + team_val(r, "heal") * 2.0,
+                "utility" => team_val(r, "buffs") + team_val(r, "debuffs") + team_val(r, "utility"),
+                "consistency" => team_val(r, "efficiency"),
+                "deploy_speed" => team_val(r, "dp_per_sec"),
+                _ => 0.0,
+            };
+            (r, metric)
+        })
+        .collect();
+    candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    candidates.into_iter()
+        .filter(|(_, m)| *m > 0.0001)
+        .take(3)
+        .filter_map(|(r, _)| r.get("operator_name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .collect()
+}
+
+async fn get_team_score(Json(req): Json<TeamScoreRequest>) -> impl IntoResponse {
+    let data_dir = "../data";
+    let loader = core::data_loader::DataLoader::new(data_dir);
+    let specs: Vec<&TeamMemberSpec> = req.members.iter().take(12).collect();
+
+    let profiles: Vec<core::team::TeamMemberProfile> = specs.par_iter()
+        .filter_map(|spec| build_member_profile(data_dir, &loader, &spec.name, spec.skill_index, spec.module_index, spec.locked))
+        .collect();
+
+    if profiles.is_empty() {
+        return Json(serde_json::json!({ "error": "No valid operators in team." }));
+    }
+
+    let mut result = core::team::score_team(&profiles);
+
+    // "Who should you swap out" — only meaningful once the team has enough members that dropping
+    // one is a real tradeoff, not just "add more operators".
+    if profiles.len() >= 4 {
+        const ROLE_AXES: [&str; 5] = ["boss_killing", "lane_holding", "resistance", "utility", "consistency"];
+        let axis_val = |name: &str| -> f64 { result["axes"][name].as_f64().unwrap_or(0.0) };
+        let has_vanguard = profiles.iter().any(|p| p.profession == "PIONEER");
+        // A missing Vanguard is a structural gap none of the 5 role axes fully capture (it's
+        // only 20% of Utility, diluted further by averaging with 4 other axes) — the
+        // "No Vanguard" recommendation already flags it, but the swap suggestion was still
+        // chasing whichever role axis happened to be lowest, which could easily be unrelated
+        // and never actually recommend a Vanguard at all. Prioritize fixing this first when it
+        // applies, matching the same threshold (6+ members) as the recommendation/score penalty.
+        let weak_axis = if !has_vanguard && profiles.len() >= 6 {
+            Some("deploy_speed")
+        } else {
+            ROLE_AXES.iter().min_by(|a, b| {
+                axis_val(a).partial_cmp(&axis_val(b)).unwrap_or(std::cmp::Ordering::Equal)
+            }).copied()
+        };
+
+        if let (Some(axis), Some(weakest)) = (weak_axis, core::team::weakest_member(&profiles)) {
+            let (general_tierlist, _) = compute_tierlist_for_category(&loader, "general", true);
+            let team_names: std::collections::HashSet<String> = profiles.iter().map(|p| p.operator_name.clone()).collect();
+            let mut profession_counts_after_removal: HashMap<String, i32> = HashMap::new();
+            for p in &profiles {
+                if p.operator_name == weakest { continue; }
+                *profession_counts_after_removal.entry(p.profession.clone()).or_insert(0) += 1;
+            }
+            let mut excluded_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+            if let Some(raw_ops) = loader.operators_raw.get("operators").and_then(|v| v.as_array()) {
+                for op_val in raw_ops {
+                    if core::data_loader::is_excluded_operator(op_val) {
+                        if let Some(n) = op_val.get("name").and_then(|v| v.as_str()) {
+                            excluded_names.insert(n.to_string());
+                        }
+                    }
+                }
+            }
+            let candidates = axis_swap_candidates(&general_tierlist, &team_names, axis, &profession_counts_after_removal, &excluded_names);
+            if let Some(obj) = result.as_object_mut() {
+                obj.insert("swap_recommendation".to_string(), serde_json::json!({
+                    "remove": weakest,
+                    "weak_axis": axis,
+                    "add_candidates": candidates,
+                }));
+            }
+        }
+    }
+
+    Json(result)
+}
+
+/// Builds a `TeamMemberProfile` for every non-excluded operator in the roster (used by the
+/// auto-generated Team Tier List's genetic search) and runs the search. This is the expensive
+/// path — roughly 3x the cost of one `/api/tierlist_data` full-roster scan, plus the GA itself —
+/// so callers should run it inside `spawn_blocking` and cache the result.
+/// How many of each class's individually-best operators are eligible for the auto-generated Team
+/// Tier List's search pool. 8 classes × 5 = ~40 operators — a pool this size can't be searched
+/// EXHAUSTIVELY (C(40,12) is still ~5.6 billion combinations), but it's small enough that the
+/// genetic search covers it far more densely/thoroughly than the earlier ~214-operator B+-tier
+/// pool did, at the cost of excluding good-but-not-top-5-in-class operators entirely (including
+/// from the manual Team Builder is unaffected — this only gates the AUTO-generated list).
+const TOP_N_PER_CLASS: usize = 5;
+
+fn compute_team_tierlist_blocking() -> Vec<Value> {
+    let data_dir = "../data";
+    let loader = core::data_loader::DataLoader::new(data_dir);
+    let (general_tierlist, _) = compute_tierlist_for_category(&loader, "general", true);
+
+    let mut by_profession: HashMap<String, Vec<(String, f64)>> = HashMap::new();
+    for c in &general_tierlist {
+        let name = c.get("operator_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let profession = c.get("profession").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let score = c.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        if name.is_empty() || profession.is_empty() { continue; }
+        by_profession.entry(profession).or_default().push((name, score));
+    }
+    let mut names: Vec<String> = Vec::new();
+    for entries in by_profession.values_mut() {
+        entries.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        entries.truncate(TOP_N_PER_CLASS);
+        names.extend(entries.iter().map(|(n, _)| n.clone()));
+    }
+
+    let profiles: HashMap<String, core::team::TeamMemberProfile> = names.par_iter()
+        .filter_map(|name| build_member_profile(data_dir, &loader, name, None, None, false).map(|p| (name.clone(), p)))
+        .collect();
+    core::team::generate_team_tierlist(&profiles)
+}
+
+async fn get_team_tierlist(State(state): State<AppState>) -> impl IntoResponse {
+    let current_signature = operators_data_signature();
+    {
+        let cache = state.team_tierlist_cache.read().await;
+        if let Some(c) = cache.as_ref() {
+            if c.data_signature == current_signature {
+                return Json(serde_json::json!({ "status": "ready", "teams": c.teams }));
+            }
+            // The roster changed since this was computed (operator added/edited/removed) — fall
+            // through and regenerate automatically instead of serving a stale list.
+        }
+    }
+    let teams = tokio::task::spawn_blocking(compute_team_tierlist_blocking).await.unwrap_or_default();
+    *state.team_tierlist_cache.write().await = Some(TeamTierlistCache { teams: teams.clone(), data_signature: current_signature });
+    Json(serde_json::json!({ "status": "ready", "teams": teams }))
+}
+
+async fn recalculate_team_tierlist(State(state): State<AppState>) -> impl IntoResponse {
+    let signature = operators_data_signature();
+    let teams = tokio::task::spawn_blocking(compute_team_tierlist_blocking).await.unwrap_or_default();
+    *state.team_tierlist_cache.write().await = Some(TeamTierlistCache { teams: teams.clone(), data_signature: signature });
+    Json(serde_json::json!({ "status": "ready", "teams": teams }))
 }
 
 #[derive(Deserialize)]
@@ -1352,8 +2058,10 @@ async fn enemy_tierlist_view() -> impl IntoResponse {
     Html(html)
 }
 
-async fn get_enemy_tierlist_data(Query(params): Query<EnemyTierlistQuery>) -> impl IntoResponse {
-    let mut category = params.category.unwrap_or_else(|| "all".to_string()).to_lowercase();
+/// The full enrich/sort/rank pass behind `/api/enemy_tierlist_data`, extracted so the CSV export
+/// endpoints can reuse it instead of re-deriving enemy rankings from scratch.
+fn compute_enemy_tierlist(category_in: &str) -> (Vec<Value>, String) {
+    let mut category = category_in.to_lowercase();
     let p = std::path::Path::new("../data/Automated_Enemies.json");
     let path = if p.exists() { p } else { std::path::Path::new("./data/Automated_Enemies.json") };
     
@@ -1378,6 +2086,29 @@ async fn get_enemy_tierlist_data(Query(params): Query<EnemyTierlistQuery>) -> im
             t == category
         });
     }
+
+    // Some entries carry a NORMAL/ELITE/BOSS tier label copied from the game's own UI category,
+    // but their stats actually belong to a special-mode encounter (CC hazard buffs, IS/RA
+    // event-only enemies, etc.) rather than a real standard-campaign threat of that class
+    // (e.g. `enemy_2093_skzams` is tagged NORMAL with ~500K HP). Drop those from the tier list
+    // itself, not just the operator-scoring baseline, so they don't misrepresent that tier.
+    enemies.retain(|e| {
+        let t = e.get("tier_type").or_else(|| e.get("tier")).and_then(|v| v.as_str()).unwrap_or("").to_uppercase();
+        let (hp_lo, hp_hi, def_lo, def_hi, res_lo, res_hi, atk_lo, atk_hi) = match t.as_str() {
+            "NORMAL" => (1_000.0, 15_000.0, 100.0, 1_000.0, 10.0, 30.0, 100.0, 1_000.0),
+            "ELITE" => (5_000.0, 30_000.0, 500.0, 2_500.0, 30.0, 60.0, 500.0, 2_000.0),
+            "BOSS" => (15_000.0, 200_000.0, 1_000.0, 4_500.0, 45.0, 90.0, 2_000.0, 4_000.0),
+            _ => return true,
+        };
+        let hp = e.get("hp").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let def = e.get("def").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let res = e.get("res").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let atk = e.get("atk").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        // ATK floor only applies when ATK is actually reported: many bosses/elites legitimately
+        // deal 0 basic-attack damage (skill/aura-only kits), which this floor isn't meant to catch.
+        let atk_below_floor = atk > 0.0 && atk < atk_lo;
+        !(hp < hp_lo || hp > hp_hi || def < def_lo || def > def_hi || res < res_lo || res > res_hi || atk_below_floor || atk > atk_hi)
+    });
 
     let mut enriched = Vec::new();
     for e in enemies {
@@ -1477,6 +2208,13 @@ async fn get_enemy_tierlist_data(Query(params): Query<EnemyTierlistQuery>) -> im
         }
     }
 
+    (enriched, category)
+}
+
+async fn get_enemy_tierlist_data(Query(params): Query<EnemyTierlistQuery>) -> impl IntoResponse {
+    let category = params.category.unwrap_or_else(|| "all".to_string());
+    let (enriched, category) = compute_enemy_tierlist(&category);
+    let n = enriched.len();
     Json(serde_json::json!({
         "enemies": enriched,
         "category": category,

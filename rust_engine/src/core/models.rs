@@ -368,6 +368,13 @@ pub struct Operator {
     
     #[serde(skip)]
     pub active_module: Option<Module>,
+
+    /// Sub-selector for skills with more than one mutually-exclusive mode the raw skill
+    /// data can't distinguish on its own (e.g. Sakiko Togawa's S2 Piano/Organ stance
+    /// switch: same `equipped_skill`, two different damage profiles). Empty string = the
+    /// skill's default/only mode.
+    #[serde(skip)]
+    pub skill_variant: String,
 }
 
 fn default_position() -> String {
@@ -1590,6 +1597,17 @@ impl Operator {
     }
 
     pub fn hits_mult(&self) -> f64 {
+        if self.is_char("char_1001_amiya2") || self.name == "Amiya (Guard)" || (self.name.contains("Amiya") && self.profession == "WARRIOR") {
+            if self.is_skill_active {
+                if let Some(s) = &self.equipped_skill {
+                    if s.name.contains("奔夜") || s.description.contains("二连击") {
+                        return 2.0;
+                    }
+                }
+            }
+            return 1.0;
+        }
+
         let bid = self.branch_id_num().unwrap_or(0);
         // Absolute shot counts from buffs (`times` family) override everything
         let mut abs = 0.0;
@@ -1605,7 +1623,7 @@ impl Operator {
                 || self.sub_profession_id == "artsfghter"
                 || self.sub_profession_id == "mystic"
                 || self.sub_profession_id == "pioneer";
-            if is_stack_buff && b.stat == "times" {
+            if is_stack_buff && (b.stat == "times" || b.stat == "hits_abs") {
                 continue;
             }
 

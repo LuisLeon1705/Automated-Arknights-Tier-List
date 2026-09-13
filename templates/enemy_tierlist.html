@@ -154,10 +154,8 @@
         <h2>ENEMY THREAT TIER LIST <span id="enemy-count-span" style="font-size: 1rem; color: var(--text-secondary); font-weight: normal;"></span></h2>
         <div style="flex: 1; max-width: 600px; display: flex; gap: 10px; align-items: center;">
             <input type="text" id="enemy-search" placeholder="Search enemy name or ID..." style="flex: 1;">
-            <button id="export-enemy-pdf-zip" class="secondary" style="display: inline-flex; align-items: center; gap: 6px; background: rgba(56, 189, 248, 0.15); border: 1px solid #38bdf8; color: #38bdf8; font-weight: 700;">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                DESCARGAR PDFS (.ZIP)
-            </button>
+            <button id="export-enemy-csv" class="secondary">EXPORT CSV</button>
+            <button id="export-enemy-csv-all" class="secondary" title="One CSV with all threat classes (All/Boss/Elite/Normal)">EXPORT ALL CATEGORIES</button>
             <button id="refresh-enemy-tierlist" class="primary">REFRESH</button>
         </div>
     </div>
@@ -226,16 +224,12 @@
     }
 
     document.getElementById('refresh-enemy-tierlist').addEventListener('click', loadEnemyTierlist);
-    document.getElementById('export-enemy-pdf-zip').addEventListener('click', () => {
-        const btn = document.getElementById('export-enemy-pdf-zip');
-        const origText = btn.innerHTML;
-        btn.disabled = true;
-        btn.innerText = 'DESCARGANDO...';
-        window.location.href = '/api/tierlist/export_pdfs_zip';
-        setTimeout(() => {
-            btn.disabled = false;
-            btn.innerHTML = origText;
-        }, 3000);
+    document.getElementById('export-enemy-csv').addEventListener('click', () => {
+        const cat = document.getElementById('enemy-category-filter').value;
+        window.location.href = `/api/enemy_tierlist/export?category=${encodeURIComponent(cat)}`;
+    });
+    document.getElementById('export-enemy-csv-all').addEventListener('click', () => {
+        window.location.href = '/api/enemy_tierlist/export_all';
     });
     document.getElementById('enemy-category-filter').addEventListener('change', loadEnemyTierlist);
     document.getElementById('enemy-metric-filter').addEventListener('change', (e) => {

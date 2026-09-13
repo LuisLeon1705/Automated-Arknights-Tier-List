@@ -11,7 +11,7 @@ The project is built on a high-performance **Rust** simulation core serving an i
 ```
 TierList/
 ├── .gitignore                  # Git exclusions (Rust build artifacts, myrtle-main, logs, zips)
-├── CHANGELOG.md                # Version history & patch notes (v1.0.3)
+├── CHANGELOG.md                # Version history & patch notes (v1.1)
 ├── GEMINI.md                   # System rules and architectural overview
 ├── README.md                   # Project presentation and myrtle.moe attribution
 ├── DOCUMENTATION.md            # Comprehensive technical documentation & API reference
@@ -19,8 +19,7 @@ TierList/
 ├── data/                       # Normalized JSON databases
 │   ├── Automated_Operators.json # 426+ operators with skills, modules, and talents
 │   ├── Automated_Enemies.json   # 1,698+ enemies with stats, skills, and mechanics
-│   ├── classes.json             # Archetype definitions and branch traits
-│   └── Arknights_Tier_Lists_PDF.zip # Compiled 116-PDF tier list bundle
+│   └── classes.json             # Archetype definitions and branch traits
 ├── rust_engine/                # High-performance simulation server in Rust
 │   ├── Cargo.toml              # Rust crate manifest (Axum, Tokio, Rayon, Minijinja)
 │   ├── Cargo.lock              # Pinned dependencies
@@ -31,28 +30,32 @@ TierList/
 │           ├── models.rs       # Operator, Skill, Module, Talent, and Buff data structures
 │           ├── simulation.rs   # 300s discrete simulation loop and damage calculations
 │           ├── data_loader.rs  # Blackboard parser and JSON normalizer
-│           └── enemy.rs        # Enemy threat model and category baseline averages
-├── Scripts/                    # Data extraction, normalization, and PDF generation (Python)
+│           ├── enemy.rs        # Enemy threat model and category baseline averages
+│           └── team.rs         # Team-level 6-axis scoring & genetic Team Tier List search
+├── Scripts/                    # Data extraction & normalization (Python), plus a standalone PDF generator
 │   ├── add_ids.py              # Operator and skill ID assigner
 │   ├── add_rarity.py           # Rarity injector
 │   ├── extract_enemies.py      # Enemy gamedata extractor
 │   ├── extract_operators.py    # Operator gamedata extractor
 │   ├── fixup_cn_operators.py   # CN server operator normalizer
-│   ├── generate_tierlist_pdfs.py # 116 analytical PDF report generator (ReportLab)
+│   ├── generate_tierlist_pdfs.py # Offline-only 116-PDF report generator; not used by the web app (see CSV export)
 │   ├── recover_images.py       # Portrait recovery and asset linker
 │   └── update_skills_talents.py# Blackboard buff parser and updater
 ├── templates/                  # Minijinja HTML templates
 │   ├── base.html               # Shared layout and navigation shell
-│   ├── dashboard.html          # Main landing dashboard
+│   ├── home.html                # Main landing homepage (roster overview)
 │   ├── tierlist.html           # Operator Tier List with live CDF charts and metric filters
+│   ├── teams.html              # Team Builder + auto-generated Team Tier List
+│   ├── comparisons.html        # Direct Comparisons (operator-vs-operator)
 │   ├── enemy_tierlist.html     # Enemy Threat Tier List with radar metrics
 │   ├── editor.html             # Interactive Operator and Buff simulator editor
 │   └── enemy_editor.html       # Enemy stat and threat level editor
 └── static/                     # Static assets
     ├── css/style.css           # Glassmorphism dark-theme styling
     ├── js/main.js              # Client-side utility functions
-    ├── avatars/                # Operator portrait images
-    └── enemy_avatars/          # Enemy portrait images
+    ├── js/operator-icons.js    # Shared class/archetype icon + name helpers
+    ├── js/team-radar.js        # 6-axis hexagonal radar chart renderer (Team pages)
+    └── images/                 # Operator portraits, class icons, archetype icons
 ```
 
 ---
@@ -76,11 +79,18 @@ Evaluates combat efficacy across 7 distinct encounter profiles:
 - **Integrated Strategies (IS)**: Roguelike burst execution and crowd control.
 - **DP Generators**: Specialized Vanguard reliability and generation rate ranking.
 
-### 3. Technology Stack
+### 3. Team Analysis (`core/team.rs`, `/teams`)
+Aggregates the per-operator simulation into a 12-operator TEAM score — a scoring layer on top of the existing engine, not new combat math.
+- **6 axes**: Boss Killing, Lane Holding, Resistance, Utility (deploy speed + buffs/debuffs/CC), Consistency, Reliability (penalizes over-specialization), each graded A-E off a rendered hexagonal radar (`static/js/team-radar.js`).
+- **Team Builder**: manual 12-operator assembly (`POST /api/team_score`, computed live) with rule-based improvement recommendations.
+- **Team Tier List**: a genetic search (population/generations/elitism/crossover/mutation + random immigrants to preserve diversity) over each class's top 5 individually-ranked operators, cached (`GET /api/team_tierlist`) and auto-invalidated when the roster data changes.
+
+### 4. Technology Stack
 - **Server Framework**: Axum 0.8 with Tokio async runtime
 - **Template Engine**: Minijinja 2.24 (Jinja2 compatible)
 - **Parallel Computing**: Rayon 1.12
 - **Data Serialization**: Serde / Serde JSON
+- **Randomness**: Rand 0.8 (Team Tier List's genetic search)
 - **Asset Serving**: Tower-HTTP
-- **PDF Generation**: Python ReportLab
+- **Skill/Module Icons**: fetched live client-side from myrtle.moe's public API (`/api/operators/{char_id}`, `/api/skill-icon/{id}`, `/api/module-icon/{id}`) for the Team Builder's loadout picker
 - **Database & Reference**: [myrtle.moe](https://myrtle.moe) open database

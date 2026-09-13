@@ -1,0 +1,750 @@
+{% extends "base.html" %}
+
+{% block title %}Teams - Arknights Analytics{% endblock %}
+
+{% block content %}
+<style>
+.tab-strip { display: flex; gap: 4px; margin-bottom: 1.2rem; border-bottom: 1px solid var(--border); }
+.tab-btn {
+    background: transparent; border: none; border-bottom: 3px solid transparent;
+    padding: 10px 18px; color: var(--text-secondary); font-weight: 700; border-radius: 0 !important;
+}
+.tab-btn.active { color: var(--accent-primary); border-bottom-color: var(--accent-primary); }
+.tab-btn:hover { background: rgba(255,255,255,0.04); border-color: transparent; }
+.tab-btn.active:hover { border-bottom-color: var(--accent-primary); }
+
+.team-builder-layout { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr); gap: 1.5rem; align-items: start; }
+@media (max-width: 980px) { .team-builder-layout { grid-template-columns: 1fr; } }
+
+.picker-toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.picker-toolbar input { flex: 1; min-width: 160px; }
+
+.op-picker-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 8px; max-height: 640px; overflow-y: auto; padding: 4px; }
+.op-pick-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px; text-align: center; cursor: pointer; position: relative; transition: border-color 0.15s ease, opacity 0.15s ease;
+}
+.op-pick-card:hover { border-color: var(--accent-primary); }
+.op-pick-card.in-team { border-color: #22c55e; opacity: 0.55; cursor: default; }
+.op-pick-card.excluded { opacity: 0.3; }
+.op-pick-card img.op-pick-portrait { width: 48px; height: 48px; border-radius: 4px; object-fit: cover; display: block; margin: 0 auto 4px; background: rgba(0,0,0,0.4); }
+.op-pick-name { font-size: 0.68rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.op-exclude-btn {
+    position: absolute; top: 2px; right: 2px; width: 16px; height: 16px; line-height: 14px;
+    border-radius: 50%; background: rgba(0,0,0,0.6); color: var(--text-secondary); font-size: 10px;
+    cursor: pointer; border: 1px solid var(--border);
+}
+.op-exclude-btn:hover { color: #ff3e3e; border-color: #ff3e3e; }
+
+.team-slots { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 1rem; }
+.team-slot {
+    background: var(--surface); border: 1px dashed var(--border); border-radius: 6px;
+    min-height: 78px; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    position: relative; padding: 4px; text-align: center;
+}
+.team-slot.filled { border-style: solid; }
+.team-slot img { width: 40px; height: 40px; border-radius: 4px; object-fit: cover; margin-bottom: 2px; }
+.team-slot .slot-name { font-size: 0.62rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.team-slot .slot-remove {
+    position: absolute; top: 1px; right: 3px; color: var(--text-secondary); cursor: pointer; font-size: 12px;
+}
+.team-slot .slot-remove:hover { color: #ff3e3e; }
+.team-slot.empty { color: var(--text-secondary); font-size: 1.4rem; }
+
+.radar-box { display: flex; justify-content: center; padding: 12px 0; }
+.axis-breakdown { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+.axis-card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; }
+.axis-card .axis-top { display: flex; justify-content: space-between; align-items: center; }
+.axis-card .axis-label { font-size: 0.72rem; font-weight: 700; color: var(--text-secondary); }
+.axis-card .axis-grade { font-size: 1.1rem; font-weight: 800; }
+.axis-card .axis-score { font-size: 0.7rem; color: var(--text-secondary); }
+.axis-card .axis-contrib { font-size: 0.66rem; color: var(--text-secondary); margin-top: 4px; }
+.overall-banner { text-align: center; padding: 10px; margin-bottom: 10px; border: 1px solid var(--accent-primary); border-radius: 6px; }
+.overall-banner .grade-big { font-size: 2rem; font-weight: 900; }
+
+.tl-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+.tl-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px;
+    cursor: pointer; transition: border-color 0.15s ease, transform 0.15s ease; box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+}
+.tl-card:hover { border-color: var(--accent-primary); transform: translateY(-2px); }
+.tl-card-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.tl-rank { color: var(--text-secondary); font-weight: 700; font-size: 0.85rem; }
+.tl-tier { font-weight: 900; font-size: 1.3rem; border-radius: 4px; padding: 1px 10px; }
+.tl-score { font-weight: 700; font-size: 0.95rem; color: var(--text-secondary); }
+.tl-radar-wrap { display: flex; justify-content: center; margin: 2px 0 8px 0; }
+.tl-card { min-width: 0; }
+.tl-portraits { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+.tl-portraits .tl-portrait-item { display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 0; }
+.tl-portraits img { width: 34px; height: 34px; border-radius: 5px; object-fit: cover; background: rgba(0,0,0,0.4); border: 1px solid var(--border); }
+.tl-portraits .tl-op-name { font-size: 0.55rem; color: var(--text-secondary); text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; width: 100%; }
+
+.team-slot.filled { cursor: pointer; }
+.team-slot .slot-locked { position: absolute; top: 1px; left: 3px; font-size: 10px; }
+
+/* Inline loadout panel — lives in the team column itself (not an overlay), so switching which
+   slot you're editing, or bouncing back to the roster, never requires closing anything first. */
+.loadout-panel { margin-bottom: 14px; padding: 12px 14px; }
+.loadout-panel-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.loadout-panel-header img { width: 32px; height: 32px; border-radius: 5px; object-fit: cover; background: rgba(0,0,0,0.4); }
+.loadout-panel-header h4 { margin: 0; flex: 1; font-size: 0.95rem; }
+.loadout-panel-close { cursor: pointer; font-size: 1.3rem; color: var(--text-secondary); line-height: 1; padding: 0 4px; }
+.loadout-panel-close:hover { color: #ff3e3e; }
+.loadout-section-title { font-size: 0.7rem; font-weight: 700; color: var(--text-secondary); letter-spacing: 1px; margin: 10px 0 6px 0; }
+.loadout-tile-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.loadout-tile {
+    background: rgba(0,0,0,0.3); border: 2px solid var(--border); border-radius: 6px;
+    padding: 6px 8px; min-width: 60px; text-align: center; cursor: pointer; transition: border-color 0.15s ease;
+}
+.loadout-tile:hover { border-color: var(--accent-primary); }
+.loadout-tile.selected { border-color: #38bdf8; background: rgba(56,189,248,0.15); }
+.loadout-tile .lt-tag { font-weight: 800; font-size: 0.85rem; }
+.loadout-tile .lt-sub { font-size: 0.62rem; color: var(--text-secondary); margin-top: 2px; }
+.loadout-tile .lt-icon { width: 40px; height: 40px; border-radius: 5px; display: block; margin: 0 auto 4px auto; background: rgba(0,0,0,0.4); object-fit: cover; }
+</style>
+
+<h2>TEAM ANALYSIS</h2>
+
+<div class="tab-strip">
+    <button class="tab-btn active" id="tab-builder-btn">TEAM BUILDER</button>
+    <button class="tab-btn" id="tab-tierlist-btn">TEAM TIER LIST</button>
+</div>
+
+<div id="tab-builder" class="tab-panel">
+    <div class="team-builder-layout">
+        <div class="picker-col">
+            <div class="picker-toolbar">
+                <input id="op-search" type="text" placeholder="Search operators...">
+                <button id="toggle-filters-btn">FILTERS</button>
+                <button id="randomize-btn" class="primary">RANDOMIZE</button>
+                <button id="clear-team-btn">CLEAR TEAM</button>
+            </div>
+            <div id="filter-panel" class="card" style="display:none; padding:12px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                    <strong>Operator Pool Filters</strong>
+                    <span id="filter-count-label" style="color:var(--text-secondary); font-size:0.8em;"></span>
+                </div>
+                <div id="filter-rarity-list" style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:10px;"></div>
+                <div id="filter-class-list" style="display:flex; gap:16px; flex-wrap:wrap;"></div>
+            </div>
+            <div id="op-picker-grid" class="op-picker-grid"></div>
+        </div>
+
+        <div class="team-col">
+            <h3 style="margin-top:0;">TEAM (<span id="team-count">0</span>/12)</h3>
+            <div id="team-slots" class="team-slots"></div>
+
+            <div id="loadout-panel" class="loadout-panel card" style="display:none;">
+                <div class="loadout-panel-header">
+                    <img id="loadout-panel-portrait" src="" alt="" onerror="this.style.visibility='hidden'">
+                    <h4 id="loadout-panel-name">Operator</h4>
+                    <button id="loadout-panel-auto-btn">AUTO</button>
+                    <span class="loadout-panel-close" id="loadout-panel-close" title="Close">&times;</span>
+                </div>
+                <div class="loadout-section-title">SKILL</div>
+                <div id="loadout-skill-row" class="loadout-tile-row"></div>
+                <div class="loadout-section-title">MODULE</div>
+                <div id="loadout-module-row" class="loadout-tile-row"></div>
+            </div>
+
+            <div id="score-area" style="display:none;">
+                <div class="overall-banner">
+                    <div style="color:var(--text-secondary); font-size:0.8rem; letter-spacing:1px;">OVERALL</div>
+                    <div id="overall-grade" class="grade-big">-</div>
+                </div>
+                <div id="radar-container" class="radar-box"></div>
+                <p id="deploy-time-line" style="text-align:center; color:var(--text-secondary); font-size:0.82rem; margin:-4px 0 12px 0;"></p>
+                <div id="axis-breakdown" class="axis-breakdown"></div>
+                <div id="recommendations-box" class="card" style="padding:12px 16px; margin-top:10px;">
+                    <strong style="font-size:0.8rem; letter-spacing:1px; color:var(--text-secondary);">RECOMMENDATIONS</strong>
+                    <ul id="recommendations-list" style="margin:8px 0 0 0; padding-left:18px; font-size:0.85rem; color:var(--text-primary);"></ul>
+                </div>
+                <div id="swap-box" class="card" style="padding:12px 16px; margin-top:10px; display:none;">
+                    <strong style="font-size:0.8rem; letter-spacing:1px; color:var(--text-secondary);">WHO SHOULD YOU SWAP NEXT?</strong>
+                    <p id="swap-text" style="margin:8px 0 0 0; font-size:0.85rem; color:var(--text-primary);"></p>
+                </div>
+            </div>
+            <p id="score-hint" style="color:var(--text-secondary); font-size:0.85rem;">Add operators to your team (or hit Randomize) to see its radar and grades.</p>
+        </div>
+    </div>
+</div>
+
+<div id="tab-tierlist" class="tab-panel" style="display:none;">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; gap:12px; flex-wrap:wrap;">
+        <p style="color:var(--text-secondary); font-size:0.85rem; max-width:640px; margin:0;">
+            Auto-generated by a genetic search over each class's <strong>top 5 individually-ranked
+            operators</strong> (~40 total, same per-operator ranking as the main Tier List) — not
+            an exhaustive ranking of every possible team from that pool (still ~5.6 billion
+            combinations), but the top 500 by score that the search found. An operator outside
+            their class's top 5 won't appear here even if they'd shine in this specific team — use
+            the Team Builder to test them manually. Click any team to load it into the Team
+            Builder for its full breakdown. Automatically regenerates the next time this page is
+            opened after the roster changes (new/edited operators) — no manual action needed,
+            though RECALCULATE also forces it. 
+        </p>
+        <button id="recalculate-tierlist-btn">RECALCULATE</button>
+    </div>
+    <div class="picker-toolbar">
+        <input id="tl-op-filter" type="text" placeholder="Filter by operator (e.g. Surtr, Eyjafjalla)...">
+        <span id="tl-filter-count" style="color:var(--text-secondary); font-size:0.85rem; align-self:center;"></span>
+    </div>
+    <p id="tierlist-hint" style="color:var(--text-secondary);">Loading...</p>
+    <div id="team-tierlist-cards" class="tl-card-grid"></div>
+    <div style="text-align:center; margin-top:16px;">
+        <button id="tl-load-more-btn" style="display:none;">LOAD MORE</button>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/operator-icons.js"></script>
+<script src="/static/js/team-radar.js"></script>
+<script>
+    const ALL_OPERATORS = {{ operators | tojson }};
+    const MAX_TEAM_SIZE = 12;
+
+    // Each member: { name, skillIndex, moduleIndex, locked }. `locked: false` (the default, set
+    // whenever an operator is added) means fully auto — the backend picks whichever skill/module
+    // combo maximizes total_score. Opening the loadout picker and choosing anything sets
+    // `locked: true`, pinning that EXACT skill+module (null index = RAW/No Module specifically).
+    let team = [];
+    let excludedOps = new Set(); // names excluded from the picker/randomizer
+    let activeFilters = { rarity: new Set(), subclass: new Set() };
+    let filterPanelBuilt = false;
+    let searchTerm = '';
+    let scoreRequestSeq = 0;
+
+    document.getElementById('tab-builder-btn').addEventListener('click', () => switchTab('builder'));
+    document.getElementById('tab-tierlist-btn').addEventListener('click', () => switchTab('tierlist'));
+    function switchTab(which) {
+        document.getElementById('tab-builder').style.display = which === 'builder' ? 'block' : 'none';
+        document.getElementById('tab-tierlist').style.display = which === 'tierlist' ? 'block' : 'none';
+        document.getElementById('tab-builder-btn').classList.toggle('active', which === 'builder');
+        document.getElementById('tab-tierlist-btn').classList.toggle('active', which === 'tierlist');
+        if (which === 'tierlist' && !teamTierlistData) fetchTeamTierlist();
+    }
+
+    let teamTierlistData = null;
+    const TEAM_TIER_COLOR = { OP: '#ef4444', S: '#f59e0b', A: '#eab308', B: '#22c55e', C: '#3b82f6', D: '#94a3b8', E: '#64748b', F: '#475569' };
+
+    async function fetchTeamTierlist(forceRecalculate) {
+        const hint = document.getElementById('tierlist-hint');
+        hint.style.display = 'block';
+        hint.innerText = forceRecalculate
+            ? 'Recalculating... this runs a genetic search across the whole roster and can take a several seconds.'
+            : 'Loading... (first load runs a genetic search across the whole roster and can take several seconds)';
+        document.getElementById('team-tierlist-cards').innerHTML = '';
+        try {
+            const res = await fetch('/api/team_tierlist' + (forceRecalculate ? '/recalculate' : ''), {
+                method: forceRecalculate ? 'POST' : 'GET'
+            });
+            const data = await res.json();
+            teamTierlistData = data.teams || [];
+            tlVisibleCount = TL_PAGE_SIZE;
+            hint.style.display = 'none';
+            renderTeamTierlist();
+        } catch (err) {
+            hint.innerText = 'Failed to load the Team Tier List.';
+        }
+    }
+
+    document.getElementById('recalculate-tierlist-btn').addEventListener('click', () => fetchTeamTierlist(true));
+
+    let tlOperatorFilter = [];
+    const TL_PAGE_SIZE = 60;
+    let tlVisibleCount = TL_PAGE_SIZE;
+    document.getElementById('tl-op-filter').addEventListener('input', (e) => {
+        tlOperatorFilter = e.target.value.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+        tlVisibleCount = TL_PAGE_SIZE;
+        renderTeamTierlist();
+    });
+
+    function currentFilteredTeams() {
+        let teams = teamTierlistData || [];
+        if (tlOperatorFilter.length) {
+            teams = teams.filter(t => {
+                const namesLower = t.members.map(n => n.toLowerCase());
+                return tlOperatorFilter.every(f => namesLower.some(n => n.includes(f)));
+            });
+        }
+        return teams;
+    }
+
+    // Rendering thousands of cards (each with its own inline SVG radar) at once would be
+    // unusably slow — only a page's worth is ever in the DOM; "Load More" appends the next page.
+    function renderTeamTierlist() {
+        const opsByName = {};
+        ALL_OPERATORS.forEach(o => opsByName[o.name] = o);
+
+        const allMatching = currentFilteredTeams();
+        document.getElementById('tl-filter-count').innerText = tlOperatorFilter.length
+            ? `${allMatching.length} / ${(teamTierlistData || []).length} teams match`
+            : `${(teamTierlistData || []).length} teams total`;
+
+        const teams = allMatching.slice(0, tlVisibleCount);
+        const grid = document.getElementById('team-tierlist-cards');
+        grid.innerHTML = teams.map(t => {
+            const color = TEAM_TIER_COLOR[t.team_tier] || '#94a3b8';
+            return `
+                <div class="tl-card" data-members='${JSON.stringify(t.members)}'>
+                    <div class="tl-card-top">
+                        <span class="tl-rank">#${t.rank}</span>
+                        <span class="tl-tier" style="color:${color}; border:1px solid ${color};">${t.team_tier}</span>
+                        <span class="tl-score">${Math.round(t.overall_score)}</span>
+                    </div>
+                    <div class="tl-radar-wrap" data-radar-id="tl-radar-${t.rank}"></div>
+                    <div class="tl-portraits">
+                        ${t.members.map(n => `
+                            <div class="tl-portrait-item" title="${n}">
+                                <img src="/static/images/${(opsByName[n] || {}).photo_path || ''}" onerror="this.style.visibility='hidden'" alt="">
+                                <span class="tl-op-name">${n}</span>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        grid.querySelectorAll('.tl-card').forEach((card, i) => {
+            const t = teams[i];
+            const radarEl = card.querySelector('.tl-radar-wrap');
+            drawTeamRadar(radarEl, t.axes, t.grades, { mini: true });
+            card.addEventListener('click', () => {
+                const names = JSON.parse(card.dataset.members);
+                team = names.map(name => ({ name, skillIndex: null, moduleIndex: null, locked: false }));
+                hideLoadoutPanel();
+                switchTab('builder');
+                onTeamChanged();
+            });
+        });
+
+        const loadMoreBtn = document.getElementById('tl-load-more-btn');
+        if (allMatching.length > teams.length) {
+            loadMoreBtn.style.display = 'block';
+            loadMoreBtn.innerText = `LOAD MORE (${teams.length} / ${allMatching.length} shown)`;
+        } else {
+            loadMoreBtn.style.display = 'none';
+        }
+    }
+
+    document.getElementById('tl-load-more-btn').addEventListener('click', () => {
+        tlVisibleCount += TL_PAGE_SIZE;
+        renderTeamTierlist();
+    });
+
+    function buildFilterPanel() {
+        if (filterPanelBuilt) return;
+        const rarities = [...new Set(ALL_OPERATORS.map(o => o.rarity))].sort((a, b) => b - a);
+        const byClass = {};
+        ALL_OPERATORS.forEach(o => {
+            const prof = o.profession || 'WARRIOR';
+            const sub = o.sub_profession_id || (o.subclass_name || 'unknown');
+            if (!byClass[prof]) byClass[prof] = new Set();
+            byClass[prof].add(sub);
+        });
+        rarities.forEach(r => activeFilters.rarity.add(r));
+        Object.values(byClass).forEach(set => set.forEach(sub => activeFilters.subclass.add(sub)));
+
+        document.getElementById('filter-rarity-list').innerHTML = rarities.map(r => `
+            <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:0.9em;">
+                <input type="checkbox" class="filter-rarity" data-rarity="${r}" checked>
+                <span>${r}★</span>
+            </label>
+        `).join('');
+
+        const classOrder = ['PIONEER', 'WARRIOR', 'TANK', 'SNIPER', 'CASTER', 'MEDIC', 'SUPPORT', 'SPECIAL'];
+        document.getElementById('filter-class-list').innerHTML = classOrder.filter(p => byClass[p]).map(prof => {
+            const subs = [...byClass[prof]].sort((a, b) => archetypeName(a).localeCompare(archetypeName(b)));
+            return `
+                <div style="min-width:160px;">
+                    <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-weight:bold; margin-bottom:6px;">
+                        <input type="checkbox" class="filter-class" data-profession="${prof}" checked>
+                        <img src="${classIconUrl(prof)}" style="width:16px; height:16px;" alt="">
+                        <span>${CLASS_LABEL[prof] || prof}</span>
+                    </label>
+                    <div style="display:flex; flex-direction:column; gap:3px; padding-left:22px;">
+                        ${subs.map(s => `
+                            <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:0.82em; color:var(--text-secondary);">
+                                <input type="checkbox" class="filter-subclass" data-profession="${prof}" data-subclass="${s}" checked>
+                                <span>${archetypeName(s)}</span>
+                            </label>
+                        `).join('')}
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        document.querySelectorAll('.filter-rarity').forEach(cb => cb.addEventListener('change', () => {
+            const r = parseInt(cb.dataset.rarity, 10);
+            if (cb.checked) activeFilters.rarity.add(r); else activeFilters.rarity.delete(r);
+            renderPicker();
+        }));
+        document.querySelectorAll('.filter-class').forEach(cb => cb.addEventListener('change', () => {
+            const prof = cb.dataset.profession;
+            document.querySelectorAll(`.filter-subclass[data-profession="${prof}"]`).forEach(child => {
+                child.checked = cb.checked;
+                if (cb.checked) activeFilters.subclass.add(child.dataset.subclass); else activeFilters.subclass.delete(child.dataset.subclass);
+            });
+            renderPicker();
+        }));
+        document.querySelectorAll('.filter-subclass').forEach(cb => cb.addEventListener('change', () => {
+            if (cb.checked) activeFilters.subclass.add(cb.dataset.subclass); else activeFilters.subclass.delete(cb.dataset.subclass);
+            const siblings = document.querySelectorAll(`.filter-subclass[data-profession="${cb.dataset.profession}"]`);
+            const parentCb = document.querySelector(`.filter-class[data-profession="${cb.dataset.profession}"]`);
+            const checkedCount = [...siblings].filter(s => s.checked).length;
+            parentCb.checked = checkedCount === siblings.length;
+            parentCb.indeterminate = checkedCount > 0 && checkedCount < siblings.length;
+            renderPicker();
+        }));
+
+        filterPanelBuilt = true;
+    }
+
+    document.getElementById('toggle-filters-btn').addEventListener('click', () => {
+        buildFilterPanel();
+        const panel = document.getElementById('filter-panel');
+        panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+    });
+
+    document.getElementById('op-search').addEventListener('input', (e) => {
+        searchTerm = e.target.value.trim().toLowerCase();
+        renderPicker();
+    });
+
+    function poolOperators() {
+        return ALL_OPERATORS.filter(o => {
+            const sub = o.sub_profession_id || (o.subclass_name || 'unknown');
+            if (activeFilters.rarity.size && !activeFilters.rarity.has(o.rarity)) return false;
+            if (activeFilters.subclass.size && !activeFilters.subclass.has(sub)) return false;
+            if (searchTerm && !o.name.toLowerCase().includes(searchTerm)) return false;
+            return true;
+        });
+    }
+
+    function renderPicker() {
+        const grid = document.getElementById('op-picker-grid');
+        const pool = poolOperators();
+        grid.innerHTML = pool.map(o => {
+            const inTeam = team.some(m => m.name === o.name);
+            const excluded = excludedOps.has(o.name);
+            return `
+                <div class="op-pick-card ${inTeam ? 'in-team' : ''} ${excluded ? 'excluded' : ''}" data-name="${o.name}">
+                    <div class="op-exclude-btn" data-name="${o.name}" title="Exclude from picker/randomizer">${excluded ? '+' : '⊘'}</div>
+                    <img class="op-pick-portrait" src="/static/images/${o.photo_path || ''}" onerror="this.style.visibility='hidden'" alt="">
+                    <div class="op-pick-name">${o.name}</div>
+                </div>
+            `;
+        }).join('');
+
+        grid.querySelectorAll('.op-exclude-btn').forEach(btn => btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const name = btn.dataset.name;
+            if (excludedOps.has(name)) excludedOps.delete(name); else excludedOps.add(name);
+            renderPicker();
+        }));
+        grid.querySelectorAll('.op-pick-card').forEach(card => card.addEventListener('click', () => {
+            const name = card.dataset.name;
+            if (excludedOps.has(name) || team.some(m => m.name === name) || team.length >= MAX_TEAM_SIZE) return;
+            team.push({ name, skillIndex: null, moduleIndex: null, locked: false });
+            onTeamChanged();
+            showLoadoutPanel(team.length - 1);
+        }));
+    }
+
+    function renderTeamSlots() {
+        document.getElementById('team-count').innerText = team.length;
+        const opsByName = {};
+        ALL_OPERATORS.forEach(o => opsByName[o.name] = o);
+        const slots = [];
+        for (let i = 0; i < MAX_TEAM_SIZE; i++) {
+            const member = team[i];
+            if (!member) { slots.push(`<div class="team-slot empty">+</div>`); continue; }
+            const o = opsByName[member.name] || {};
+            slots.push(`
+                <div class="team-slot filled" data-idx="${i}" title="Click to choose skill/module">
+                    <span class="slot-remove" data-idx="${i}">&times;</span>
+                    ${member.locked ? '<span class="slot-locked" title="Locked loadout">&#128274;</span>' : ''}
+                    <img src="/static/images/${o.photo_path || ''}" onerror="this.style.visibility='hidden'" alt="">
+                    <div class="slot-name">${member.name}</div>
+                </div>
+            `);
+        }
+        document.getElementById('team-slots').innerHTML = slots.join('');
+        document.querySelectorAll('.slot-remove').forEach(el => el.addEventListener('click', (e) => {
+            e.stopPropagation();
+            team.splice(parseInt(el.dataset.idx, 10), 1);
+            hideLoadoutPanel(); // indices shift on removal — avoid the panel pointing at a stale/wrong member
+            onTeamChanged();
+        }));
+        document.querySelectorAll('.team-slot.filled').forEach(el => el.addEventListener('click', () => {
+            showLoadoutPanel(parseInt(el.dataset.idx, 10));
+        }));
+    }
+
+    document.getElementById('randomize-btn').addEventListener('click', () => {
+        const existingNames = new Set(team.map(m => m.name));
+        const pool = poolOperators().map(o => o.name).filter(n => !excludedOps.has(n) && !existingNames.has(n));
+        while (team.length < MAX_TEAM_SIZE && pool.length) {
+            const idx = Math.floor(Math.random() * pool.length);
+            team.push({ name: pool.splice(idx, 1)[0], skillIndex: null, moduleIndex: null, locked: false });
+        }
+        onTeamChanged();
+    });
+
+    document.getElementById('clear-team-btn').addEventListener('click', () => {
+        team = [];
+        hideLoadoutPanel();
+        onTeamChanged();
+    });
+
+    // --- Loadout picker modal: choose a specific skill/module for one team member instead of
+    // letting the backend auto-pick whichever combo maximizes total_score. Mirrors the game's own
+    // "Select Skill / Select Module" screen in structure, but as tag+SP-cost / code tiles rather
+    // than icons — this dataset has no skill/module icon images to draw from. ---
+    let loadoutModalIdx = null;
+
+    function eligibleModules(op) {
+        return (op.modules || []).filter(m => {
+            const type = m.module_type || 'STANDARD';
+            const isRa = type === 'RA' || (m.name || '').startsWith('RA-');
+            const isIsw = type === 'ISW' || (m.name || '').startsWith('ISW-');
+            return !isRa && !isIsw;
+        });
+    }
+
+    // Real skill/module icons, fetched live from myrtle.moe's public API by char_id (our own
+    // dataset has no skill IDs at all, and a module's icon ID is a different string than the
+    // `equip_id` we do store — both only resolvable via their enriched operator endpoint).
+    // Cached per char_id so reopening the panel for the same operator never re-fetches; a `null`
+    // cache entry means "already tried, failed" so a flaky/offline request doesn't retry forever.
+    // Falls back to the tag-only tiles (already rendered before this resolves) on any failure.
+    const operatorMediaCache = {};
+    async function fetchOperatorMedia(charId) {
+        if (!charId) return null;
+        if (charId in operatorMediaCache) return operatorMediaCache[charId];
+        try {
+            const res = await fetch(`https://api.myrtle.moe/api/operators/${encodeURIComponent(charId)}`);
+            if (!res.ok) throw new Error('bad status');
+            const data = await res.json();
+            const skillIds = (data.skills || []).map(s => s.skillId || null);
+            // myrtle includes a synthetic index-0 "ORIGINAL" module (typeIcon: "original") that
+            // isn't a real installable module and isn't in our own `op.modules` list — skip it so
+            // the remaining entries line up by index with ours (X, then Y, then D...).
+            const moduleIcons = (data.modules || [])
+                .filter(m => m.typeIcon !== 'original')
+                .map(m => m.uniEquipIcon || null);
+            const result = { skillIds, moduleIcons };
+            operatorMediaCache[charId] = result;
+            return result;
+        } catch (err) {
+            operatorMediaCache[charId] = null;
+            return null;
+        }
+    }
+
+    function showLoadoutPanel(idx) {
+        const member = team[idx];
+        if (!member) return;
+        const op = ALL_OPERATORS.find(o => o.name === member.name);
+        if (!op) return;
+        loadoutModalIdx = idx;
+
+        document.getElementById('loadout-panel-name').innerText = member.name;
+        document.getElementById('loadout-panel-portrait').src = '/static/images/' + (op.photo_path || '');
+
+        const skillRow = document.getElementById('loadout-skill-row');
+        const skillTiles = [`
+            <div class="loadout-tile ${member.locked && member.skillIndex === null ? 'selected' : ''}" data-skill="null">
+                <div class="lt-tag">RAW</div>
+                <div class="lt-sub">No skill</div>
+            </div>
+        `];
+        (op.skills || []).forEach((s, i) => {
+            const durText = s.duration && s.duration > 0 ? `${Math.round(s.duration)}s` : (s.duration === -1 ? 'Infinite' : '');
+            skillTiles.push(`
+                <div class="loadout-tile ${member.locked && member.skillIndex === i ? 'selected' : ''}" data-skill="${i}" title="${s.name}">
+                    <div class="lt-tag">S${i + 1}</div>
+                    <div class="lt-sub">${s.sp_cost != null ? s.sp_cost + ' SP' : ''}${durText ? ' · ' + durText : ''}</div>
+                </div>
+            `);
+        });
+        skillRow.innerHTML = skillTiles.join('');
+
+        const moduleRow = document.getElementById('loadout-module-row');
+        const mods = eligibleModules(op);
+        const moduleTiles = [`
+            <div class="loadout-tile ${member.locked && member.moduleIndex === null ? 'selected' : ''}" data-module="null">
+                <div class="lt-tag">NONE</div>
+                <div class="lt-sub">No Module</div>
+            </div>
+        `];
+        mods.forEach((m, i) => {
+            moduleTiles.push(`
+                <div class="loadout-tile ${member.locked && member.moduleIndex === i ? 'selected' : ''}" data-module="${i}" title="${m.name}">
+                    <div class="lt-tag">${m.code || 'MOD'}</div>
+                    <div class="lt-sub">Lv.${m.level || 1}</div>
+                </div>
+            `);
+        });
+        moduleRow.innerHTML = moduleTiles.join('');
+
+        const selectTile = (row, tile) => {
+            row.querySelectorAll('.loadout-tile').forEach(t => t.classList.remove('selected'));
+            tile.classList.add('selected');
+        };
+        skillRow.querySelectorAll('.loadout-tile').forEach(tile => tile.addEventListener('click', () => {
+            const v = tile.dataset.skill;
+            member.skillIndex = v === 'null' ? null : parseInt(v, 10);
+            member.locked = true;
+            selectTile(skillRow, tile);
+            renderTeamSlots();
+            fetchTeamScore();
+        }));
+        moduleRow.querySelectorAll('.loadout-tile').forEach(tile => tile.addEventListener('click', () => {
+            const v = tile.dataset.module;
+            member.moduleIndex = v === 'null' ? null : parseInt(v, 10);
+            member.locked = true;
+            selectTile(moduleRow, tile);
+            renderTeamSlots();
+            fetchTeamScore();
+        }));
+
+        document.getElementById('loadout-panel').style.display = 'block';
+
+        // Upgrade the tag-only tiles with real icons once fetched (non-blocking) — bail if the
+        // user has since switched to a different slot's panel by the time this resolves.
+        fetchOperatorMedia(op.char_id).then(media => {
+            if (!media || loadoutModalIdx !== idx) return;
+            skillRow.querySelectorAll('.loadout-tile[data-skill]').forEach(tile => {
+                const v = tile.dataset.skill;
+                if (v === 'null') return;
+                const skillId = media.skillIds[parseInt(v, 10)];
+                if (skillId) {
+                    tile.insertAdjacentHTML('afterbegin', `<img class="lt-icon" src="https://api.myrtle.moe/api/skill-icon/${encodeURIComponent(skillId)}" alt="" onerror="this.remove()">`);
+                }
+            });
+            moduleRow.querySelectorAll('.loadout-tile[data-module]').forEach(tile => {
+                const v = tile.dataset.module;
+                if (v === 'null') return;
+                const iconId = media.moduleIcons[parseInt(v, 10)];
+                if (iconId) {
+                    tile.insertAdjacentHTML('afterbegin', `<img class="lt-icon" src="https://api.myrtle.moe/api/module-icon/${encodeURIComponent(iconId)}" alt="" onerror="this.remove()">`);
+                }
+            });
+        });
+    }
+
+    function hideLoadoutPanel() {
+        document.getElementById('loadout-panel').style.display = 'none';
+        loadoutModalIdx = null;
+    }
+
+    document.getElementById('loadout-panel-close').addEventListener('click', hideLoadoutPanel);
+    document.getElementById('loadout-panel-auto-btn').addEventListener('click', () => {
+        if (loadoutModalIdx === null) return;
+        const member = team[loadoutModalIdx];
+        member.skillIndex = null;
+        member.moduleIndex = null;
+        member.locked = false;
+        renderTeamSlots();
+        fetchTeamScore();
+        showLoadoutPanel(loadoutModalIdx);
+    });
+
+    function onTeamChanged() {
+        renderPicker();
+        renderTeamSlots();
+        fetchTeamScore();
+    }
+
+    const AXIS_META = {
+        boss_killing: 'BOSS KILLING', lane_holding: 'LANE HOLDING', resistance: 'RESISTANCE',
+        utility: 'UTILITY', consistency: 'CONSISTENCY', reliability: 'RELIABILITY',
+    };
+    // Not a radar axis — only used as a `swap_recommendation.weak_axis` label when the team has
+    // no Vanguard at all, a gap the 6 scored axes don't fully capture on their own.
+    const SWAP_AXIS_LABELS = { ...AXIS_META, deploy_speed: 'DEPLOY SPEED (NO VANGUARD)' };
+
+    async function fetchTeamScore() {
+        const seq = ++scoreRequestSeq;
+        if (team.length === 0) {
+            document.getElementById('score-area').style.display = 'none';
+            document.getElementById('score-hint').style.display = 'block';
+            return;
+        }
+        document.getElementById('score-hint').innerText = 'Calculating...';
+        document.getElementById('score-hint').style.display = 'block';
+        try {
+            const res = await fetch('/api/team_score', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ members: team.map(m => ({
+                    name: m.name, skill_index: m.skillIndex, module_index: m.moduleIndex, locked: m.locked
+                })) })
+            });
+            const data = await res.json();
+            if (seq !== scoreRequestSeq) return; // a newer request superseded this one
+            if (data.error) {
+                document.getElementById('score-hint').innerText = data.error;
+                document.getElementById('score-area').style.display = 'none';
+                return;
+            }
+            document.getElementById('score-hint').style.display = 'none';
+            document.getElementById('score-area').style.display = 'block';
+            renderScore(data);
+        } catch (err) {
+            if (seq !== scoreRequestSeq) return;
+            document.getElementById('score-hint').innerText = 'Failed to calculate team score.';
+        }
+    }
+
+    function renderScore(data) {
+        document.getElementById('overall-grade').innerText = data.overall_grade + '  (' + Math.round(data.overall_score) + ')';
+        drawTeamRadar(document.getElementById('radar-container'), data.axes, data.grades);
+
+        const breakdown = document.getElementById('axis-breakdown');
+        breakdown.innerHTML = Object.keys(AXIS_META).map(key => {
+            const score = Math.round(data.axes[key] || 0);
+            const gr = data.grades[key] || '-';
+            const contrib = (data.contributors[key] || []).join(', ') || '&mdash;';
+            const color = { OP: '#ef4444', S: '#f59e0b', A: '#eab308', B: '#22c55e', C: '#3b82f6', D: '#94a3b8', E: '#64748b' }[gr] || '#94a3b8';
+            return `
+                <div class="axis-card">
+                    <div class="axis-top">
+                        <span class="axis-label">${AXIS_META[key]}</span>
+                        <span class="axis-grade" style="color:${color};">${gr}</span>
+                    </div>
+                    <div class="axis-score">${score}/100</div>
+                    <div class="axis-contrib">Top: ${contrib}</div>
+                </div>
+            `;
+        }).join('');
+
+        const recList = document.getElementById('recommendations-list');
+        recList.innerHTML = (data.recommendations || []).map(r => `<li style="margin-bottom:4px;">${r}</li>`).join('');
+
+        const swapBox = document.getElementById('swap-box');
+        const swap = data.swap_recommendation;
+        if (swap && swap.remove) {
+            swapBox.style.display = 'block';
+            const axisLabel = SWAP_AXIS_LABELS[swap.weak_axis] || swap.weak_axis;
+            const candidates = (swap.add_candidates || []).join(', ') || 'no clear roster candidate found';
+            document.getElementById('swap-text').innerHTML =
+                `Your weakest link is <strong>${swap.remove}</strong> (contributes the least overall). ` +
+                `The team's weakest axis is <strong>${axisLabel}</strong> — consider swapping ${swap.remove} for ` +
+                `<strong>${candidates}</strong>, who are strong specifically there.`;
+        } else {
+            swapBox.style.display = 'none';
+        }
+
+        const fullDeploy = data.raw && data.raw.team_full_deploy_time;
+        document.getElementById('deploy-time-line').innerHTML = (fullDeploy != null)
+            ? `Time to field all ${data.member_count} operators from a standing start: <strong>${Math.round(fullDeploy)}s</strong> (at 1 DP/sec natural regen + Vanguard DP generation)`
+            : '';
+    }
+
+    renderPicker();
+    renderTeamSlots();
+</script>
+{% endblock %}

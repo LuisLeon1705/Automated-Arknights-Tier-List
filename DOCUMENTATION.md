@@ -6,7 +6,7 @@ An empirical, mathematical combat simulator and analytical tier list engine for 
 
 ## 1. System Architecture Overview
 
-The system is structured as a high-performance, deterministic combat simulator running on a **Rust** backend with an asynchronous **Axum** web framework, accompanied by a reactive frontend rendered using **Minijinja** (Jinja2-compatible) templates and vanilla JavaScript. Data extraction, enrichment, and batch PDF generation are handled by a modular **Python** pipeline.
+The system is structured as a high-performance, deterministic combat simulator running on a **Rust** backend with an asynchronous **Axum** web framework, accompanied by a reactive frontend rendered using **Minijinja** (Jinja2-compatible) templates and vanilla JavaScript. Data extraction and enrichment is handled by a modular **Python** pipeline.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -29,10 +29,9 @@ The system is structured as a high-performance, deterministic combat simulator r
                    │ Reads / Writes                        │ Invokes on-demand
 ┌──────────────────▼──────────────────┐ ┌──────────────────▼──────────────────┐
 │          JSON Databases             │ │       Python Script Pipeline        │
-│  - data/Automated_Operators.json    │ │  - Scripts/generate_tierlist_pdfs.py │
-│  - data/Automated_Enemies.json      │ │  - Scripts/extract_operators.py     │
-│  - data/classes.json                │ │  - Scripts/extract_enemies.py       │
-│  - data/Arknights_Tier_Lists_PDF.zip│ │  - Scripts/update_skills_talents.py │
+│  - data/Automated_Operators.json    │ │  - Scripts/extract_operators.py     │
+│  - data/Automated_Enemies.json      │ │  - Scripts/extract_enemies.py       │
+│  - data/classes.json                │ │  - Scripts/update_skills_talents.py │
 └─────────────────────────────────────┘ └─────────────────────────────────────┘
 ```
 
@@ -48,14 +47,26 @@ All endpoints are hosted by default on `http://127.0.0.1:8000` (configurable via
 
 #### `GET /`
 - **Handler**: `read_root` (`rust_engine/src/main.rs`)
-- **Description**: Renders the main landing dashboard displaying project statistics, operator counts, and navigation shortcuts.
-- **Template**: `templates/dashboard.html`
+- **Description**: Renders the homepage — roster breakdown by rarity/class and quick links to the Tier List, Teams, Enemy Tier List, Direct Comparisons, and the Operator/Enemy Editors.
+- **Template**: `templates/home.html`
 - **Response**: `200 OK` (Content-Type: `text/html; charset=utf-8`)
 
 #### `GET /tierlist`
 - **Handler**: `tierlist_view` (`rust_engine/src/main.rs`)
 - **Description**: Renders the primary Operator Analytical Tier List dashboard featuring cumulative distribution function (CDF) curve graphs, category selectors, ranking metric toggles, search filters, and PDF/CSV export buttons.
 - **Template**: `templates/tierlist.html`
+- **Response**: `200 OK` (Content-Type: `text/html; charset=utf-8`)
+
+#### `GET /teams`
+- **Handler**: `teams_view` (`rust_engine/src/main.rs`)
+- **Description**: Renders the Teams page — the **Team Builder** tab (manual 12-operator assembly with rarity/class/archetype filters and a randomizer, scored live via `/api/team_score`) and the **Team Tier List** tab (an auto-generated, genetically-searched ranking of team compositions, backed by `/api/team_tierlist`).
+- **Template**: `templates/teams.html`
+- **Response**: `200 OK` (Content-Type: `text/html; charset=utf-8`)
+
+#### `GET /compare`
+- **Handler**: `comparisons_view` (`rust_engine/src/main.rs`)
+- **Description**: Renders Direct Comparisons — a side-by-side operator-vs-operator simulation tool (skill/module selection per operator, live-simulated damage/heal/DP time series via `POST /api/simulate_batch`).
+- **Template**: `templates/comparisons.html`
 - **Response**: `200 OK` (Content-Type: `text/html; charset=utf-8`)
 
 #### `GET /enemy_tierlist`
@@ -208,6 +219,26 @@ All endpoints are hosted by default on `http://127.0.0.1:8000` (configurable via
 - **Response Payload**: `200 OK` (Content-Type: `application/json`)
   Returns an array of simulation summaries, final stats, and sampled yield curves for each requested configuration.
 
+#### `POST /api/team_score`
+- **Handler**: `get_team_score` (`rust_engine/src/main.rs`)
+- **Description**: Aggregates up to 12 operators' existing per-operator simulation output (boss/normal/general categories, `evaluate_single_operator`) into 6 team-level axes — Boss Killing, Lane Holding, Resistance, Utility, Consistency, Reliability — computed live per request (no caching). See `rust_engine/src/core/team.rs::score_team` for the aggregation formulas.
+- **Request Body**: `application/json`
+  ```json
+  { "members": ["SilverAsh the Reignfrost", "Eyjafjalla the Hvít Aska", "Saria", "..."] }
+  ```
+- **Response Payload**: `200 OK` (Content-Type: `application/json`)
+  Returns `{ axes, grades, contributors, overall_score, overall_grade, member_count, recommendations, raw }` — `axes`/`grades` are the 6-axis scores (0-100) and A-E letter grades, `contributors` lists the top 3 operators driving each axis, `recommendations` is a list of rule-based improvement suggestions, and `raw` exposes the underlying aggregate numbers (including `team_full_deploy_time`, the literal seconds to field all requested operators from a standing start).
+
+#### `GET /api/team_tierlist`
+- **Handler**: `get_team_tierlist` (`rust_engine/src/main.rs`)
+- **Description**: Returns the auto-generated Team Tier List — the top 500 (by score) team compositions found by a genetic search (`rust_engine/src/core/team.rs::generate_team_tierlist`) over each class's top 5 individually-ranked operators (~40 candidates). Served from an in-memory cache keyed by a fingerprint of the operator data files; automatically recomputes (several seconds) the first time this is called after the roster changes, otherwise returns instantly.
+- **Response Payload**: `200 OK` (Content-Type: `application/json`)
+  Returns `{ status, teams }`, where each entry in `teams` is a `score_team` result plus `members` (the 12 operator names), `rank`, and `team_tier` (percentile-based OP/S/A/B/C/D/E/F, same scale as `/api/tierlist_data`).
+
+#### `POST /api/team_tierlist/recalculate`
+- **Handler**: `recalculate_team_tierlist` (`rust_engine/src/main.rs`)
+- **Description**: Forces an immediate recomputation of the Team Tier List (same payload shape as `GET /api/team_tierlist`), replacing the cache regardless of whether the roster data changed.
+
 ---
 
 ### 2.3 Operator Management APIs
@@ -262,10 +293,26 @@ All endpoints are hosted by default on `http://127.0.0.1:8000` (configurable via
 - **Query Parameters**: `category` (e.g. `general`, `boss`, `elite`).
 - **Response**: `200 OK` (Content-Type: `text/csv`, Content-Disposition: `attachment; filename="arknights_tier_list.csv"`)
 
-#### `GET /api/tierlist/export_pdfs_zip`
-- **Handler**: `download_tierlists_pdf_zip` (`rust_engine/src/main.rs`)
-- **Description**: Serves the pre-compiled ZIP archive containing all 116 analytical PDF reports. If the ZIP does not exist on disk, the endpoint automatically invokes `Scripts/generate_tierlist_pdfs.py` to compile it on-demand.
-- **Response**: `200 OK` (Content-Type: `application/zip`, Content-Disposition: `attachment; filename="Arknights_Tier_Lists_PDF.zip"`)
+#### `GET /api/tierlist/export_all`
+- **Handler**: `export_tierlist_csv_all` (`rust_engine/src/main.rs`)
+- **Description**: The full operator cross-analysis in one CSV — every one of the 8 target categories (General/Normal/Elite/Boss/RA/IS/CC/DP, a `Category` column per row) crossed with all 17 of the Tier List page's own ranking metrics (`OPERATOR_RANK_METRICS`), each contributing a `Rank (metric)`/`Tier (metric)` column pair computed within that row's category (`annotate_metric_ranks`). A blank pair means that row was gated out of that metric (currently only `dp`, mirroring the page's own "only operators who generate DP" filter for that view).
+- **Response**: `200 OK` (Content-Type: `text/csv`, Content-Disposition: `attachment; filename="arknights_tier_list_all_categories.csv"`)
+
+#### `GET /api/enemy_tierlist/export`
+- **Handler**: `export_enemy_tierlist_csv` (`rust_engine/src/main.rs`)
+- **Description**: CSV export of the Enemy Tier List for one threat class.
+- **Query Parameters**: `category` (`all`, `boss`, `elite`, or `normal`).
+- **Response**: `200 OK` (Content-Type: `text/csv`, Content-Disposition: `attachment; filename="arknights_enemy_tier_list.csv"`)
+
+#### `GET /api/enemy_tierlist/export_all`
+- **Handler**: `export_enemy_tierlist_csv_all` (`rust_engine/src/main.rs`)
+- **Description**: The full enemy cross-analysis in one CSV — all 4 threat classes (All/Boss/Elite/Normal, each independently re-ranked against just that subset) crossed with all 8 of the page's "RANK BY" metrics (`ENEMY_RANK_METRICS`), same `Rank (metric)`/`Tier (metric)` column-pair pattern as the operator export above.
+- **Response**: `200 OK` (Content-Type: `text/csv`, Content-Disposition: `attachment; filename="arknights_enemy_tier_list_all_categories.csv"`)
+
+> **Removed**: `GET /api/tierlist/export_pdfs_zip` (a 116-PDF, ~22 MB ZIP export) was retired in
+> favor of the CSV exports above, which cover the same data far more lightly. The standalone
+> `Scripts/generate_tierlist_pdfs.py` generator still exists for offline use but is no longer
+> wired into the web app.
 
 ---
 
@@ -277,7 +324,7 @@ All endpoints are hosted by default on `http://127.0.0.1:8000` (configurable via
 |---|---|---|
 | [`ejecutar_programa.bat`] | Windows batch script that builds the Rust engine in `--release` mode and launches the web server on `http://127.0.0.1:8000`. | Windows CMD, Cargo |
 | [`README.md`] | Project presentation document providing feature overviews, architecture highlights, quick-start guides, and explicit attribution to **[myrtle.moe](https://myrtle.moe)**. | Markdown |
-| [`CHANGELOG.md`]| Official version history, patch notes, and release considerations for v1.0.3. | Markdown |
+| [`CHANGELOG.md`]| Official version history, patch notes, and release considerations for v1.1. | Markdown |
 | [`GEMINI.md`] | Master AI context guide and system specification detailing directories, rules, and core mathematical principles. | Markdown |
 | [`DOCUMENTATION.md`] | Exhaustive technical documentation and API reference manual. | Markdown |
 | [`.gitignore`] | Git exclusion patterns covering Rust target builds, Python caches, temporary logs, `.zip` archives, and `myrtle-main/`. | Git |
@@ -291,7 +338,6 @@ All endpoints are hosted by default on `http://127.0.0.1:8000` (configurable via
 | [`data/Automated_Operators.json`] | Canonical operator database containing 426+ operators. Each record includes base stats, skills (sp cost, duration, blackboard buffs), modules (X, Y, D, RA, IS), talents, and sub-archetype IDs. | JSON (`{ "operators": [ Operator ] }`) |
 | [`data/Automated_Enemies.json`] | Canonical enemy database containing 1,698+ enemies. Each entry includes HP, DEF, RES, ATK, attack interval, weight, movement speed, dodge ratios, skill counts, revive flags, and threat classifications. | JSON (`[ EnemyData ]`) |
 | [`data/classes.json`] | Subclass/Branch archetype blueprint defining standard base attack intervals, default target counts, attack ranges, and branch combat traits. | JSON (`{ "classes": [ ... ] }`) |
-| [`data/Arknights_Tier_Lists_PDF.zip`] | Pre-compiled archive (22.20 MB) containing all 116 high-density analytical PDF tier lists (84 operator matrices + 32 enemy matrices). | ZIP Archive |
 
 ---
 
@@ -299,13 +345,14 @@ All endpoints are hosted by default on `http://127.0.0.1:8000` (configurable via
 
 | File Path | Purpose | Key Structs / Functions / Crates |
 |---|---|---|
-| [`Cargo.toml`] | Crate specification file. Configures package metadata and pinned dependencies. | `axum` (0.8), `tokio` (1.53), `rayon` (1.12), `minijinja` (2.24), `serde` (1.0), `tower-http` (0.7) |
-| [`src/main.rs`] | Server entry point. Registers all 18 Axum routes, binds the TCP listener, evaluates batch simulations, renders templates via Minijinja, executes Rayon multi-threaded tier list evaluations, and handles file uploads and exports. | `main`, `read_root`, `get_tierlist_data`, `get_enemy_tierlist_data`, `evaluate_single_operator`, `export_tierlist_csv`, `download_tierlists_pdf_zip` |
-| [`src/core/mod.rs`] | Module registry declaring `data_loader`, `models`, `simulation`, and `enemy`. | Rust module exports |
+| [`Cargo.toml`] | Crate specification file. Configures package metadata and pinned dependencies. | `axum` (0.8), `tokio` (1.53), `rayon` (1.12), `minijinja` (2.24), `serde` (1.0), `tower-http` (0.7), `rand` (0.8) |
+| [`src/main.rs`] | Server entry point. Registers all Axum routes, binds the TCP listener, evaluates batch simulations, renders templates via Minijinja, executes Rayon multi-threaded tier list evaluations, builds per-team `TeamMemberProfile`s for `core::team`, and handles file uploads and exports. | `main`, `read_root`, `get_tierlist_data`, `compute_tierlist_for_category`, `get_enemy_tierlist_data`, `evaluate_single_operator`, `build_member_profile`, `get_team_score`, `compute_team_tierlist_blocking`, `get_team_tierlist`, `export_tierlist_csv`, `download_tierlists_pdf_zip` |
+| [`src/core/mod.rs`] | Module registry declaring `data_loader`, `models`, `simulation`, `enemy`, and `team`. | Rust module exports |
 | [`src/core/models.rs`] | Defines core domain data structures and mathematical stat calculators. Implements buff stacking (additive ratios, flat additions, true multipliers), ASPD/interval formulas, Physical/Arts EHP, and Hits-to-Kill. | `Operator`, `Skill`, `Module`, `Talent`, `Buff`, `final_atk()`, `final_def()`, `final_interval()`, `calculate_stat()`, `calculate_ehp_phys()`, `calculate_ehp_arts()`, `calculate_hits_to_kill()` |
 | [`src/core/simulation.rs`] | Implements the 300-second discrete simulation loop. Models rotation timings, attack intervals, branch traits, instant skills, ammo mechanics, fast-redeploy retreat cycles, defeat penalties, and damage floors. | `SimulationEnvironment`, `state_rates()`, `run_5_minute_sim()`, `run_wave_sim()`, `run_boss_sim()` |
 | [`src/core/data_loader.rs`]( | JSON ingestion and normalization layer. Parses raw operator files and blackboards into strongly-typed Rust structs. Normalizes module levels, SP charging types, and talent aura buffs. | `DataLoader`, `load_operators()`, `parse_blackboard_buffs()`, `get_operator()` |
 | [`src/core/enemy.rs`] | Enemy data loading, category statistical aggregation, and Threat Score calculations. Provides baseline average enemy stats for `normal`, `elite`, and `boss` categories. | `EnemyData`, `AverageEnemy`, `calculate_average_enemy()`, `get_enemy_by_category()`, `calculate_threat_score()` |
+| [`src/core/team.rs`] | Team-level scoring: aggregates per-operator simulation output into 6 team axes (Boss Killing, Lane Holding, Resistance, Utility, Consistency, Reliability), plus the genetic search behind the Team Tier List. | `TeamMemberProfile`, `score_team()`, `build_recommendations()`, `generate_team_tierlist()`, `build_candidate_pool()`, `impact_weight()` |
 
 ---
 
@@ -313,7 +360,7 @@ All endpoints are hosted by default on `http://127.0.0.1:8000` (configurable via
 
 | File Path | Language & Libraries | Purpose & Execution |
 |---|---|---|
-| [`Scripts/generate_tierlist_pdfs.py`] | Python 3, `reportlab`, `urllib` | Generates 116 analytical PDF reports (84 operator matrices across 6 target categories × 14 ranking metrics, plus 32 enemy matrices across 4 categories × 8 metrics). Employs response caching and packages results into `Arknights_Tier_Lists_PDF.zip`. |
+| [`Scripts/generate_tierlist_pdfs.py`] | Python 3, `reportlab`, `urllib` | Standalone generator for 116 analytical PDF reports (84 operator matrices × 14 ranking metrics, plus 32 enemy matrices). Not wired into the web app (superseded there by the lightweight CSV export) — run manually for offline PDF reports. |
 | [`Scripts/extract_operators.py`] | Python 3, `json` | Extracts raw operator data, attributes, skills, and branches from the `myrtle-main` repository into standardized intermediate structures. |
 | [`Scripts/extract_enemies.py`] | Python 3, `json` | Extracts enemy statistics, combat levels, skill counts, and phases from raw gamedata into `Automated_Enemies.json`. |
 | [`Scripts/update_skills_talents.py`] | Python 3, `json`, `urllib` | Fetches up-to-date talent descriptions, module stat increments, and blackboard buff parameters, updating `Automated_Operators.json`. |
@@ -329,8 +376,10 @@ All endpoints are hosted by default on `http://127.0.0.1:8000` (configurable via
 | File Path | Template Engine | Role & Contents |
 |---|---|---|
 | [`templates/base.html`] | Minijinja / HTML5 | Master layout shell providing standard navigation bar, header badges, responsive meta viewport, and favicon declarations. |
-| [`templates/dashboard.html`] | Minijinja / HTML5 | Main landing view showing engine summary cards, database stats, and direct links to the Tier Lists and Editors. |
-| [`templates/tierlist.html`] | Minijinja / HTML5 / JS | Interactive Operator Tier List dashboard. Features a dynamic SVG Cumulative Distribution Function (CDF) curve, ranking metric selectors, category buttons, profession filters, card views, and PDF/CSV download triggers. |
+| [`templates/home.html`] | Minijinja / HTML5 | Homepage view showing roster breakdown by rarity/class and direct links to the Tier List, Teams, Enemy Tier List, Direct Comparisons, and Editors. |
+| [`templates/tierlist.html`] | Minijinja / HTML5 / JS | Interactive Operator Tier List dashboard. Features a dynamic SVG Cumulative Distribution Function (CDF) curve, ranking metric selectors, category buttons, profession/archetype/rarity filters, card views, and a CSV export button. |
+| [`templates/teams.html`] | Minijinja / HTML5 / JS | Team Builder (manual 12-operator assembly, filters, randomizer, live 6-axis radar + recommendations via `/api/team_score`) and Team Tier List (auto-generated, genetically-searched team rankings via `/api/team_tierlist`, with an operator-name filter and paginated card grid). |
+| [`templates/comparisons.html`] | Minijinja / HTML5 / JS | Direct Comparisons — side-by-side operator-vs-operator skill/module selection with live-simulated damage/heal/DP charts via `/api/simulate_batch`. |
 | [`templates/enemy_tierlist.html`] | Minijinja / HTML5 / JS | Interactive Enemy Threat Tier List dashboard. Renders enemy portrait cards with threat badges, DPS ratings, DEF/RES meters, and special mechanic indicators. |
 | [`templates/editor.html`] | Minijinja / HTML5 / JS | Operator Sandbox Editor. Allows modifying base stats, adding/editing custom buffs, selecting skills and modules, and executing real-time 300s simulations with SVG rotation graphs. |
 | [`templates/enemy_editor.html`] | Minijinja / HTML5 / JS | Enemy Sandbox Editor. Form-based interface to create, modify, or delete enemy entries. |
@@ -343,8 +392,9 @@ All endpoints are hosted by default on `http://127.0.0.1:8000` (configurable via
 |---|---|---|
 | [`static/css/style.css`] | CSS3 | Dark-mode glassmorphism design system. Defines responsive flex/grid layouts, animated progress bars, tier badge color hierarchies (`OP`, `S`, `A`, `B`, `C`, `D`), and modals. |
 | [`static/js/main.js`] | JavaScript | Core client-side utility script for asynchronous form submission and dynamic DOM updates. |
-| `static/avatars/` | PNG Images | High-resolution portrait illustrations for 490+ operators. |
-| `static/enemy_avatars/` | PNG Images | Portrait illustrations for 1,600+ enemies. |
+| [`static/js/operator-icons.js`] | JavaScript | Shared class/archetype icon URL helpers and English archetype-name mapping, used by both `tierlist.html` and `teams.html` so the two stay in sync. |
+| [`static/js/team-radar.js`] | JavaScript | Renders the 6-axis hexagonal radar chart (raw inline SVG, no chart library) for both the Team Builder's full-size radar and the Team Tier List's compact per-card thumbnails. |
+| `static/images/` | PNG/WebP Images | Operator portraits, class icons (`static/images/classes/`), and archetype icons (`static/images/archetypes/`). |
 
 ---
 

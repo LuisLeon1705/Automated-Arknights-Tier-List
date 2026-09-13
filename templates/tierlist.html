@@ -66,6 +66,7 @@
     object-fit: cover;
     border: 1px solid var(--border);
     flex-shrink: 0;
+    display: block;
 }
 .op-title-block {
     flex: 1;
@@ -86,6 +87,22 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    display: flex;
+    align-items: center;
+    gap: 3px;
+}
+.op-subclass span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+/* static/css/style.css has a `.op-mini-card img { width: 60px; height: 60px; }` rule (for the
+   portrait) whose specificity beats a bare `.op-class-icon` class selector — scope through the
+   parent classes here so these small archetype/class icons don't inherit that 60px sizing. */
+.op-mini-card .op-subclass img.op-class-icon {
+    width: 12px;
+    height: 12px;
+    flex-shrink: 0;
+    opacity: 0.85;
 }
 
 .config-tags-row {
@@ -157,12 +174,10 @@
         <h2>MATHEMATICAL RANKING <span id="op-count-span" style="font-size: 1rem; color: var(--text-secondary); font-weight: normal;"></span></h2>
         <div style="flex: 1; max-width: 800px; display: flex; gap: 10px; align-items: center;">
             <input type="text" id="tierlist-search" placeholder="Search operator..." style="flex: 1;">
-            
+
+            <button id="toggle-filters" class="secondary" style="position: relative;">FILTERS <span id="filter-active-badge" style="display:none; margin-left:4px; background:#38bdf8; color:#04202e; border-radius:10px; padding:0 6px; font-size:0.75em; font-weight:700;"></span></button>
             <button id="export-csv" class="secondary">EXPORT CSV</button>
-            <button id="export-pdf-zip" class="secondary" style="display: inline-flex; align-items: center; gap: 6px; background: rgba(56, 189, 248, 0.15); border: 1px solid #38bdf8; color: #38bdf8; font-weight: 700;">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                DESCARGAR PDFS (.ZIP)
-            </button>
+            <button id="export-csv-all" class="secondary" title="One CSV with all 8 target categories (General/Normal/Elite/Boss/RA/IS/CC/DP)">EXPORT ALL CATEGORIES</button>
             <button id="refresh-tierlist" class="primary">RECALCULATE</button>
         </div>
     </div>
@@ -208,6 +223,23 @@
         <div class="checkbox-group">
             <input type="checkbox" id="best-result-only" checked>
             <label for="best-result-only">Best Config Only</label>
+        </div>
+    </div>
+
+    <div id="filter-panel" style="display:none; margin-bottom: 1.5rem; background: rgba(0,0,0,0.25); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+            <div style="display:flex; gap:14px;">
+                <button id="filter-select-all" class="secondary" style="padding:4px 10px; font-size:0.8em;">Select All</button>
+                <button id="filter-clear-all" class="secondary" style="padding:4px 10px; font-size:0.8em;">Clear All</button>
+            </div>
+            <span id="filter-count-label" style="color: var(--text-secondary); font-size:0.85em;"></span>
+        </div>
+        <div style="display:flex; gap:24px; flex-wrap:wrap; align-items:flex-start;">
+            <div style="min-width:120px;">
+                <div style="font-weight:bold; color:#38bdf8; margin-bottom:6px; font-size:0.85em;">RARITY</div>
+                <div id="filter-rarity-list" style="display:flex; flex-direction:column; gap:4px;"></div>
+            </div>
+            <div id="filter-class-list" style="display:flex; gap:24px; flex-wrap:wrap; flex:1;"></div>
         </div>
     </div>
 
@@ -271,10 +303,146 @@
 
 {% block scripts %}
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="/static/js/operator-icons.js"></script>
 <script>
     let allTierData = { general: [], detailed: [] };
     let currentMode = 'general';
 let currentView = 'general';
+
+    // Filter state: a rarity/profession/subclass combo is INCLUDED when present in its Set.
+    // Populated with every value found in the dataset once it loads (nothing filtered by default).
+    let activeFilters = { rarity: new Set(), profession: new Set(), subclass: new Set() };
+    let filterPanelBuilt = false;
+
+    function updateFilterBadge() {
+        const badge = document.getElementById('filter-active-badge');
+        const allR = document.querySelectorAll('#filter-rarity-list input[type=checkbox]').length;
+        const allC = document.querySelectorAll('#filter-class-list input.filter-subclass').length;
+        const onR = activeFilters.rarity.size;
+        const onC = activeFilters.subclass.size;
+        const isFiltered = (allR > 0 && onR < allR) || (allC > 0 && onC < allC);
+        if (isFiltered) {
+            badge.style.display = 'inline-block';
+            badge.innerText = 'ON';
+        } else {
+            badge.style.display = 'none';
+        }
+        document.getElementById('filter-count-label').innerText = filterPanelBuilt
+            ? `${onR}/${allR} rarities · ${onC}/${allC} archetypes selected` : '';
+    }
+
+    function buildFilterPanel(dataArray) {
+        if (filterPanelBuilt) return;
+        const rarities = [...new Set(dataArray.map(o => o.rarity))].sort((a, b) => b - a);
+        const byClass = {};
+        dataArray.forEach(o => {
+            const prof = o.profession || 'WARRIOR';
+            const sub = o.sub_profession_id || (o.subclass_name || 'unknown');
+            if (!byClass[prof]) byClass[prof] = new Set();
+            byClass[prof].add(sub);
+        });
+
+        rarities.forEach(r => activeFilters.rarity.add(r));
+        Object.keys(byClass).forEach(prof => {
+            activeFilters.profession.add(prof);
+            byClass[prof].forEach(sub => activeFilters.subclass.add(sub));
+        });
+
+        const rarityList = document.getElementById('filter-rarity-list');
+        rarityList.innerHTML = rarities.map(r => `
+            <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:0.9em;">
+                <input type="checkbox" class="filter-rarity" data-rarity="${r}" checked>
+                <span>${r}★</span>
+            </label>
+        `).join('');
+
+        const classOrder = ['PIONEER', 'WARRIOR', 'TANK', 'SNIPER', 'CASTER', 'MEDIC', 'SUPPORT', 'SPECIAL'];
+        const classList = document.getElementById('filter-class-list');
+        classList.innerHTML = classOrder.filter(prof => byClass[prof]).map(prof => {
+            const subs = [...byClass[prof]].sort((a, b) => archetypeName(a).localeCompare(archetypeName(b)));
+            return `
+                <div style="min-width:180px;">
+                    <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-weight:bold; margin-bottom:6px;">
+                        <input type="checkbox" class="filter-class" data-profession="${prof}" checked>
+                        <img src="${classIconUrl(prof)}" style="width:16px; height:16px;" alt="">
+                        <span>${CLASS_LABEL[prof] || prof}</span>
+                    </label>
+                    <div style="display:flex; flex-direction:column; gap:3px; padding-left:22px;">
+                        ${subs.map(s => `
+                            <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:0.85em; color: var(--text-secondary);">
+                                <input type="checkbox" class="filter-subclass" data-profession="${prof}" data-subclass="${s}" checked>
+                                <img src="${archetypeIconUrl(s)}" style="width:14px; height:14px;" alt="" onerror="this.style.visibility='hidden'">
+                                <span>${archetypeName(s)}</span>
+                            </label>
+                        `).join('')}
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        document.querySelectorAll('.filter-rarity').forEach(cb => {
+            cb.addEventListener('change', () => {
+                const r = parseInt(cb.dataset.rarity, 10);
+                if (cb.checked) activeFilters.rarity.add(r); else activeFilters.rarity.delete(r);
+                updateFilterBadge();
+                renderView();
+            });
+        });
+
+        document.querySelectorAll('.filter-class').forEach(cb => {
+            cb.addEventListener('change', () => {
+                const prof = cb.dataset.profession;
+                const children = document.querySelectorAll(`.filter-subclass[data-profession="${prof}"]`);
+                children.forEach(child => {
+                    child.checked = cb.checked;
+                    const sub = child.dataset.subclass;
+                    if (cb.checked) activeFilters.subclass.add(sub); else activeFilters.subclass.delete(sub);
+                });
+                if (cb.checked) activeFilters.profession.add(prof); else activeFilters.profession.delete(prof);
+                updateFilterBadge();
+                renderView();
+            });
+        });
+
+        document.querySelectorAll('.filter-subclass').forEach(cb => {
+            cb.addEventListener('change', () => {
+                const sub = cb.dataset.subclass;
+                const prof = cb.dataset.profession;
+                if (cb.checked) activeFilters.subclass.add(sub); else activeFilters.subclass.delete(sub);
+                const siblings = document.querySelectorAll(`.filter-subclass[data-profession="${prof}"]`);
+                const parentCb = document.querySelector(`.filter-class[data-profession="${prof}"]`);
+                const checkedCount = [...siblings].filter(s => s.checked).length;
+                parentCb.checked = checkedCount === siblings.length;
+                parentCb.indeterminate = checkedCount > 0 && checkedCount < siblings.length;
+                updateFilterBadge();
+                renderView();
+            });
+        });
+
+        filterPanelBuilt = true;
+        updateFilterBadge();
+    }
+
+    document.getElementById('toggle-filters').addEventListener('click', () => {
+        const panel = document.getElementById('filter-panel');
+        panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+    });
+
+    document.getElementById('filter-select-all').addEventListener('click', () => {
+        document.querySelectorAll('#filter-panel input[type=checkbox]').forEach(cb => { cb.checked = true; cb.indeterminate = false; });
+        document.querySelectorAll('.filter-rarity').forEach(cb => activeFilters.rarity.add(parseInt(cb.dataset.rarity, 10)));
+        document.querySelectorAll('.filter-subclass').forEach(cb => activeFilters.subclass.add(cb.dataset.subclass));
+        document.querySelectorAll('.filter-class').forEach(cb => activeFilters.profession.add(cb.dataset.profession));
+        updateFilterBadge();
+        renderView();
+    });
+
+    document.getElementById('filter-clear-all').addEventListener('click', () => {
+        document.querySelectorAll('#filter-panel input[type=checkbox]').forEach(cb => { cb.checked = false; cb.indeterminate = false; });
+        activeFilters = { rarity: new Set(), profession: new Set(), subclass: new Set() };
+        updateFilterBadge();
+        renderView();
+    });
 
     async function fetchTierlistData() {
         const cat = document.getElementById('target-category').value;
@@ -287,7 +455,8 @@ let currentView = 'general';
             const data = await response.json();
             if (response.ok) {
                 allTierData = data;
-                
+                buildFilterPanel(data.detailed && data.detailed.length > 0 ? data.detailed : data.general);
+
                 if (data.enemy_stats) {
                     document.getElementById('enemy-stats-container').style.display = 'block';
                     const catNames = {
@@ -370,22 +539,21 @@ let currentView = 'general';
         window.location.href = `/api/tierlist/export?category=${encodeURIComponent(cat)}`;
     });
 
-    document.getElementById('export-pdf-zip').addEventListener('click', () => {
-        const btn = document.getElementById('export-pdf-zip');
-        const origText = btn.innerHTML;
-        btn.disabled = true;
-        btn.innerText = 'DESCARGANDO...';
-        window.location.href = '/api/tierlist/export_pdfs_zip';
-        setTimeout(() => {
-            btn.disabled = false;
-            btn.innerHTML = origText;
-        }, 3000);
+    document.getElementById('export-csv-all').addEventListener('click', () => {
+        window.location.href = '/api/tierlist/export_all';
     });
 
     function getFilteredData(dataArray) {
         let arr = JSON.parse(JSON.stringify(dataArray));
         const bestOnly = document.getElementById('best-result-only').checked;
-        
+
+        if (filterPanelBuilt) {
+            arr = arr.filter(d =>
+                activeFilters.rarity.has(d.rarity) &&
+                activeFilters.subclass.has(d.sub_profession_id || (d.subclass_name || 'unknown'))
+            );
+        }
+
         let sortField = 'score';
         let asc = false;
         if (currentMode === 'dp') {
@@ -544,7 +712,11 @@ let currentView = 'general';
                                             <img class="op-portrait" src="/static/images/${o.photo_path}?v={{ version }}" onerror="this.src='/static/images/placeholder.webp'" alt="${o.operator_name}">
                                             <div class="op-title-block">
                                                 <div class="op-name" title="${o.operator_name}">${o.operator_name}</div>
-                                                <div class="op-subclass" title="${o.profession || 'WARRIOR'} - ${o.subclass_name || 'Unknown'}">${o.profession || "WARRIOR"} • ${o.subclass_name || "Unknown"}</div>
+                                                <div class="op-subclass" title="${CLASS_LABEL[o.profession] || o.profession} - ${archetypeName(o.sub_profession_id, o.subclass_name)}">
+                                                    <img class="op-class-icon" src="${classIconUrl(o.profession)}" alt="" onerror="this.style.visibility='hidden'">
+                                                    <img class="op-class-icon" src="${archetypeIconUrl(o.sub_profession_id)}" alt="" onerror="this.style.visibility='hidden'">
+                                                    <span>${CLASS_LABEL[o.profession] || o.profession} • ${archetypeName(o.sub_profession_id, o.subclass_name)}</span>
+                                                </div>
                                             </div>
                                         </div>
                                         

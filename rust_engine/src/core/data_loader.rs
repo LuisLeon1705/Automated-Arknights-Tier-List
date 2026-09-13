@@ -401,6 +401,52 @@ impl DataLoader {
         }
     }
 
+    /// Extracts the bracket namespace from a raw key ending in `suffix`, e.g.
+    /// `bracket_ns("closur_s_3[add_cost_period].cost", ".cost") == Some("add_cost_period")`.
+    fn bracket_ns(stat: &str, suffix: &str) -> Option<String> {
+        if !stat.ends_with(suffix) { return None; }
+        let open = stat.find('[')?;
+        let close = stat.find(']')?;
+        if close < open { return None; }
+        Some(stat[open + 1..close].to_string())
+    }
+
+    /// Pre-multiplies each `X[ns].cost` raw buff by the real tick count implied by its sibling
+    /// `X[ns].interval` (same namespace `ns`) and the skill's own duration, turning a per-tick
+    /// value into the correct per-cast total before normalization collapses the bracket
+    /// namespace away. Also handles the same mechanic spelled with plain (non-bracketed) `cost` +
+    /// `interval` keys (Saga, Tulip, Vigil, Zima), gated on the "gain N DP over the skill's
+    /// duration" description wording so a generic `interval` key doesn't get reinterpreted for
+    /// an unrelated skill. See the call site for why this exists.
+    fn expand_dp_trickle_buffs(skill_duration: f64, desc: &str, buffs: &mut Vec<Buff>) {
+        if skill_duration <= 0.0 { return; }
+        let intervals: Vec<(String, f64)> = buffs.iter()
+            .filter_map(|b| Self::bracket_ns(&b.stat, ".interval").zip(b.value.as_f64()))
+            .filter(|(_, v)| *v > 0.0)
+            .collect();
+        for b in buffs.iter_mut() {
+            if let Some(ns) = Self::bracket_ns(&b.stat, ".cost") {
+                if let Some((_, interval)) = intervals.iter().find(|(n, _)| *n == ns) {
+                    if let Some(v) = b.value.as_f64() {
+                        let ticks = (skill_duration / interval).floor().max(1.0);
+                        b.value = serde_json::json!(v * ticks);
+                    }
+                }
+            }
+        }
+        if desc.contains("获得") && desc.contains("费用") {
+            let plain_interval = buffs.iter().find(|b| b.stat == "interval").and_then(|b| b.value.as_f64()).filter(|v| *v > 0.0);
+            if let Some(interval) = plain_interval {
+                let ticks = (skill_duration / interval).floor().max(1.0);
+                for b in buffs.iter_mut() {
+                    if b.stat == "cost" {
+                        if let Some(v) = b.value.as_f64() { b.value = serde_json::json!(v * ticks); }
+                    }
+                }
+            }
+        }
+    }
+
     /// Rewrites raw blackboard buff keys into the engine's semantic stat names.
     fn normalize_operator(op: &mut Operator) {
         fn apply_norm(b: &mut Buff, kind: &str, desc: &str) {
@@ -444,7 +490,21 @@ impl DataLoader {
             synth_pp(&mut t.buffs);
         }
         for s in &mut op.skills {
+            // "X[ns].cost" + "X[ns].interval" (same bracket namespace `ns`) is a periodic DP
+            // trickle: gain `cost` DP every `interval` seconds for the skill's duration (Closure,
+            // Tulip, SilverAsh the Reignfrost, Saileach, Muelsyse, Kestrel, Mitm, Wanqing,
+            // Poncirus, Courier, Figurino all use this pattern). Left as-is, the per-buff
+            // normalization below only sees the raw per-tick `cost` value with no notion of how
+            // many ticks the skill's duration contains, and `dp_gain_per_cast()`'s own fallback
+            // then estimates tick count from the OPERATOR'S OWN ATTACK interval instead — which
+            // is wrong for a fixed real-time timer unrelated to attack speed. That silently
+            // overestimated Closure/Tulip's DP output several-fold during their attack-speed
+            // buffing skills, and dropped SilverAsh the Reignfrost's entire periodic trickle in
+            // favor of just her one-time burst. Pre-multiply by the real tick count (duration /
+            // interval, from the ACTUAL blackboard value) here, while the bracket namespace is
+            // still intact in the raw stat name, before it collapses into "dp_gain_per_cast".
             let d = s.description.clone();
+            Self::expand_dp_trickle_buffs(s.duration, &d, &mut s.buffs);
             for b in &mut s.buffs { apply_norm(b, "skill", &d); }
             for b in &mut s.passive_buffs { apply_norm(b, "skill", &d); }
             for b in &mut s.overdrive_buffs { apply_norm(b, "skill", &d); }
@@ -557,10 +617,40 @@ impl DataLoader {
         {
             for op in ops {
                 if let Some(name) = op.get("name").and_then(|v| v.as_str()) {
-                    names.push(name.to_string());
+                    if !is_excluded_operator(op) {
+                        names.push(name.to_string());
+                    }
                 }
             }
         }
         names
     }
+}
+
+/// Two families of "Exclusive Operators" (per arknights.wiki.gg) share a name with a real,
+/// normally-recruitable operator but are never actually part of a player's roster — obtainable
+/// only pre-built inside Integrated Strategies' Temporary Recruitment or Stationary Security
+/// Service:
+/// - **Reserve Operators** ("Reserve Operator - Caster", etc, char_50x_r**** / char_60x_c****):
+///   generic, skill-less, talent-less stand-ins. 13 entries, mostly 3-4★.
+/// - **Elite Operators**: max-level/promotion pre-built CLONES of a real 5★ base operator, but
+///   imported as a separate 6★-rarity entry with the identical name (Sharp, Pith, Stormeye,
+///   Touch, Tulip, Shalem, Raidian) — confirmed by cross-referencing the raw game data: each
+///   clone's `char_id` falls in the 608-614 range and its `subProfessionId` exactly matches its
+///   508-514-range real counterpart. Left in, these 7 pure duplicates inflated the operator count
+///   (460 raw entries for only 447 real operators) and could shadow the real operator in
+///   name-based lookups depending on array order.
+pub fn is_excluded_operator(op: &Value) -> bool {
+    let name = op.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    if name.starts_with("Reserve Operator") { return true; }
+    if let Some(char_id) = op.get("char_id").and_then(|v| v.as_str()) {
+        if let Some(rest) = char_id.strip_prefix("char_") {
+            if let Some(num_str) = rest.split('_').next() {
+                if let Ok(num) = num_str.parse::<u32>() {
+                    if (608..=614).contains(&num) { return true; }
+                }
+            }
+        }
+    }
+    false
 }

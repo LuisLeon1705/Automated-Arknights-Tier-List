@@ -55,6 +55,34 @@ pub struct AverageEnemy {
     pub levitate_immune_ratio: f64,
 }
 
+/// Some entries in `Automated_Enemies.json` carry a NORMAL/ELITE/BOSS `tier` label copied
+/// straight from the game's own UI category, but their actual stats belong to a special-mode
+/// encounter (CC hazard-buffed mobs, IS/RA event-only enemies, etc.) rather than a real
+/// standard-campaign threat of that class — e.g. `enemy_2093_skzams` is tagged NORMAL with
+/// ~500K HP on the strong end, and training-dummy-tier mobs with near-zero stats on the weak
+/// end. Left in, a handful of these on either side skew the tier's average stat baseline that
+/// every operator gets scored against. Cutoffs (floor and cap) are generous relative to genuine
+/// standard-campaign enemies for each tier, so this only drops true outliers, not just "tanky"
+/// or "squishy".
+fn is_outlier_for_tier(e: &EnemyData) -> bool {
+    // (hp_floor, hp_cap, def_floor, def_cap, res_floor, res_cap, atk_floor, atk_cap)
+    let (hp_lo, hp_hi, def_lo, def_hi, res_lo, res_hi, atk_lo, atk_hi) = match e.tier.to_ascii_uppercase().as_str() {
+        "NORMAL" => (1_000.0, 15_000.0, 100.0, 1_000.0, 10.0, 30.0, 100.0, 1_000.0),
+        "ELITE" => (5_000.0, 30_000.0, 500.0, 2_500.0, 30.0, 60.0, 500.0, 2_000.0),
+        "BOSS" => (15_000.0, 200_000.0, 1_000.0, 4_500.0, 45.0, 90.0, 2_000.0, 4_000.0),
+        _ => return false,
+    };
+    // ATK floor only applies when the enemy actually reports a nonzero basic-attack ATK: many
+    // real bosses/elites legitimately have atk=0 (all their damage comes from skills/auras, not
+    // a basic attack — see the `effective_atk` fallback below), and that's not the "weak
+    // exception" this floor is meant to catch.
+    let atk_below_floor = e.atk > 0.0 && e.atk < atk_lo;
+    e.hp < hp_lo || e.hp > hp_hi
+        || e.r#def < def_lo || e.r#def > def_hi
+        || e.res < res_lo || e.res > res_hi
+        || atk_below_floor || e.atk > atk_hi
+}
+
 pub fn calculate_enemy_stats_for_tier(data_dir: &str, target_tier: Option<&str>) -> AverageEnemy {
     let path = Path::new(data_dir).join("Automated_Enemies.json");
     let p = if path.exists() { path } else { Path::new("./data/Automated_Enemies.json").to_path_buf() };
@@ -93,7 +121,8 @@ pub fn calculate_enemy_stats_for_tier(data_dir: &str, target_tier: Option<&str>)
                 }
                 
                 if e.hp <= 1.0 { continue; }
-                
+                if is_outlier_for_tier(&e) { continue; }
+
                 defs.push(e.r#def);
                 res_vals.push(e.res);
                 hps.push(e.hp);

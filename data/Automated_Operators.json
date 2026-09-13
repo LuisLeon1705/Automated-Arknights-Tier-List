@@ -36061,7 +36061,7 @@
     {
       "operator_id": 1141,
       "char_id": "char_1001_amiya2",
-      "name": "Amiya",
+      "name": "Amiya (Guard)",
       "class_name": "AmiyaGuard",
       "available_skills": [
         1,
@@ -36239,7 +36239,7 @@
     {
       "operator_id": 1142,
       "char_id": "char_1037_amiya3",
-      "name": "Amiya",
+      "name": "Amiya (Medic)",
       "class_name": "AmiyaMedic",
       "available_skills": [
         1,

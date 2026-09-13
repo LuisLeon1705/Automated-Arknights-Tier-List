@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 use std::collections::HashMap;
-use super::models::Operator;
+use super::models::{Operator, Skill};
 
 pub struct SimulationEnvironment {
     pub primary_operator: Operator,
@@ -250,7 +250,23 @@ impl SimulationEnvironment {
                 // must not leak onto other Abjurers whose skills genuinely heal for less (or, for
                 // pure atk/aspd-buff skills with no heal mechanic at all, for nothing).
                 let hm = if heal_buff > 0.0 { heal_buff } else if is_haruka { 0.75 } else { 0.0 };
-                let direct_hps = heal_targets * atk * hm / interval;
+                // Most Abjurer heals are continuous, applied at the operator's own attack
+                // cadence (`interval`) — but a kit that reads "立即进行一次治疗" ("immediately
+                // perform ONE heal") is a single burst cast, not a repeating heal-over-time (e.g.
+                // Perfumer's S1: one 500%-ATK heal per activation, rechargeable twice via SP,
+                // SP-type `INCREASE_WITH_TIME` — nothing about it is tied to her attack rate at
+                // all). Dividing that scale by her ~1-2s attack interval as if it re-fired every
+                // attack overcounted her healing by roughly the same factor a repeating heal
+                // would give you for free. Use the skill's own `sp_cost` as the recast cadence
+                // instead (a real SP-based skill genuinely recasts roughly every sp_cost seconds
+                // at baseline regen) whenever this one-shot pattern is detected.
+                let is_burst_cast = op.equipped_skill.as_ref().map(|s| s.description.contains("立即进行一次治疗")).unwrap_or(false);
+                let cadence = if is_burst_cast {
+                    op.equipped_skill.as_ref().map(|s| s.sp_cost.max(1.0)).unwrap_or(interval)
+                } else {
+                    interval
+                };
+                let direct_hps = heal_targets * atk * hm / cadence;
                 let bubble_hps = bubble_targets * atk * bubble_heal_ratio / interval;
                 r.heal_per_sec = direct_hps + bubble_hps;
                 r.heal_targets = heal_targets;
@@ -464,15 +480,28 @@ impl SimulationEnvironment {
                     r.arts_per_shot = atk * 2.2;
                     r.target_limit = 2.0;
                 } else if s_name.contains("满月") || s_name.contains("舞会") || s_desc.contains("满月的舞会") || s_desc.contains("切换") {
-                    // S2: Switch skill (Piano: +110% ATK Phys vs Organ: +140 ASPD Arts; Fever grants double strike)
-                    // High-performance Organ Arts stance (+140 ASPD, 1.3 hits/atk average with Fever)
-                    let base_atk = op.base_stats.get("atk").and_then(|v| v.as_f64()).unwrap_or(atk);
-                    let organ_aspd = 100.0 + op.calculate_stat("aspd") + 140.0;
-                    let organ_interval = (1.3 / (organ_aspd / 100.0)).max(0.45);
-                    r.attacks_per_sec = 1.0 / organ_interval;
-                    r.shots_per_attack = 1.3;
-                    r.arts_per_shot = base_atk;
-                    r.phys_per_shot = 0.0;
+                    // S2: Switch skill between two stances (`op.skill_variant` picks which; Piano
+                    // is the default/initial stance per the raw text: "钢琴（初始）").
+                    if op.skill_variant != "organ" {
+                        // Piano: +110% ATK, notes fly faster and PIERCE THROUGH every enemy they
+                        // pass (raw text: "命中目标后穿过敌人造成物理伤害"), dealing Physical damage
+                        // to each one instead of locking to a single target like Organ mode.
+                        r.attacks_per_sec = 1.0 / interval;
+                        r.shots_per_attack = 1.0;
+                        r.phys_per_shot = atk * 2.1; // 100% base note + 110% Piano bonus
+                        r.arts_per_shot = 0.0;
+                        r.target_limit = 3.0; // pierce hits every enemy in the note's line, not just one
+                    } else {
+                        // Organ (default/initial stance): +140 ASPD, single-target Arts note,
+                        // 1.3 hits/attack average once Fever's double-strike uptime is folded in.
+                        let base_atk = op.base_stats.get("atk").and_then(|v| v.as_f64()).unwrap_or(atk);
+                        let organ_aspd = 100.0 + op.calculate_stat("aspd") + 140.0;
+                        let organ_interval = (1.3 / (organ_aspd / 100.0)).max(0.45);
+                        r.attacks_per_sec = 1.0 / organ_interval;
+                        r.shots_per_attack = 1.3;
+                        r.arts_per_shot = base_atk;
+                        r.phys_per_shot = 0.0;
+                    }
                 } else {
                     // S1: 8 notes progressive Arts burst (sum = 4.22x ATK)
                     r.arts_per_shot = atk * 4.22;
@@ -513,22 +542,78 @@ impl SimulationEnvironment {
             return r;
         }
 
+        // AMIYA (GUARD) (Arts Fighter, char_1001_amiya2)
+        if op.is_char("char_1001_amiya2") || op.name == "Amiya (Guard)" || (op.name.contains("Amiya") && op.profession == "WARRIOR") {
+            if is_skill {
+                if s_name.contains("绝影") || s_desc.contains("绝影") || s_desc.contains("斩击") {
+                    // S2 (影霄·绝影):
+                    // 10-slash flurry over ~3.5s (9 slashes @ 220% Arts + 1 final slash @ 440% True damage).
+                    // Single cast per battle ("整场战斗中该技能只能释放一次").
+                    r.attacks_per_sec = 10.0 / 3.5;
+                    r.shots_per_attack = 1.0;
+                    r.arts_per_shot = 0.9 * atk * 2.2;
+                    r.true_per_shot = 0.1 * atk * 4.4;
+                    r.phys_per_shot = 0.0;
+                } else {
+                    // S1 (影霄·奔夜): +80% ATK, double strike (2 hits per attack), 60% Arts dodge
+                    r.attacks_per_sec = 1.0 / interval;
+                    r.shots_per_attack = 2.0;
+                    r.arts_per_shot = atk;
+                    r.phys_per_shot = 0.0;
+                }
+            } else {
+                r.attacks_per_sec = 1.0 / interval;
+                r.shots_per_attack = 1.0;
+                r.arts_per_shot = atk;
+                r.phys_per_shot = 0.0;
+            }
+            return r;
+        }
+
         // RAY (Hunter, Physical #1)
+        // NOTE: this used to be a set of flat hardcoded damage constants (11000.0 for S3,
+        // 2500.0 for base) completely untethered from her actual ATK stat — meaning every Ray,
+        // regardless of gear/trust/potential, dealt the exact same fixed damage. That inflated
+        // her `boss_dmg_score` (and therefore Team Builder's `impact_weight`, which is what
+        // decides each axis's "Top contributors") independent of investment, letting her crowd
+        // out genuinely-relevant contributors on axes like Consistency that have nothing to do
+        // with her raw damage. Rewritten to scale off real ATK using her actual blackboard
+        // atk_scale values (also: the old S1/S2 name checks compared against English skill
+        // names that never appear in this dataset's Chinese `skill.name` field, so both were
+        // dead code silently falling through to an arbitrary `atk * 2.2 * 1.15` guess).
         if op.name == "Ray" {
             if is_skill {
-                if s_name == "'See the Light'" || s_desc.contains("See the Light") || s_name.contains("光") {
-                    // S3: 8 high-velocity ammo shots, 3.3x ATK scale, Sandbeast pins target and ignores 260 DEF
-                    r.phys_per_shot = 11000.0 * interval;
+                if s_name.contains("得见光芒") || s_name.contains("光") {
+                    // S3 "得见光芒" (See the Light): 330% ATK per shot. The bigger part of this
+                    // skill's real power isn't even the 330% scale — it's "装填间隔大幅缩短"
+                    // (reload interval hugely cut), which for a Hunter archetype (whose whole
+                    // gimmick is a fire-a-few-then-reload cycle) means she stops eating downtime
+                    // between bursts and just fires continuously instead. This engine has no
+                    // generic Hunter reload-cycle model, so `interval` here is already her plain
+                    // per-shot cadence with no downtime baked in — crediting only the 330% scale
+                    // at that same cadence silently drops the skill's actual headline effect.
+                    // Blackboard's own `reload_interval: -1.2` (seconds) is applied directly as
+                    // a cadence speedup instead of inventing a separate multiplier.
+                    r.phys_per_shot = atk * 3.3;
+                    r.attacks_per_sec = 1.0 / (interval - 1.2).max(0.3);
                     r.shots_per_attack = 1.0;
-                } else if s_name == "Parting Shot" {
-                    r.phys_per_shot = atk * 4.5 * 1.15;
+                } else if s_name.contains("脱身矢") {
+                    // S1 "脱身矢" (Escape Arrow): immediate 450% ATK bonus shot + knockback,
+                    // rechargeable twice, cheap/fast SP cost — modeled as an empowered attack.
+                    r.phys_per_shot = atk * 4.5;
+                    r.attacks_per_sec = 1.0 / interval;
                     r.shots_per_attack = 1.0;
                 } else {
-                    r.phys_per_shot = atk * 2.2 * 1.15;
+                    // S2 "广域警觉" is a pure +20% ATK passive/toggle with no attack-scale term
+                    // of its own — that ATK% is already folded into `atk`, so this is just her
+                    // normal attack.
+                    r.phys_per_shot = atk;
+                    r.attacks_per_sec = 1.0 / interval;
                     r.shots_per_attack = 1.0;
                 }
             } else {
-                r.phys_per_shot = 2500.0 * interval;
+                r.phys_per_shot = atk;
+                r.attacks_per_sec = 1.0 / interval;
                 r.shots_per_attack = 1.0;
             }
             return r;
@@ -1081,7 +1166,16 @@ impl SimulationEnvironment {
         // Other non-healer classes DO NOT heal the team (self-heals only benefit personal survivability)
 
         r.flat_arts_dps = op.flat_arts_dps();
-        if is_skill { r.end_burst_raw = atk * op.end_burst_mult(); }
+        // `damage_by_atk_scale` bursts are normally an "on skill end" payoff, gated on a skill
+        // actually having run. A handful of Executor-branch operators (THRM-EX: "does not
+        // attack... 3 seconds after deployment, deals 400% ATK AoE damage... then retreats") have
+        // NO skill at all — the burst is their entire kit, driven purely by a talent that always
+        // triggers on deploy. `is_skill` is permanently false for them (there's no skill state to
+        // activate), so gating on it dropped their only source of damage to zero. Credit the
+        // talent-driven burst here too when there's no skill to gate it on.
+        if is_skill || (op.equipped_skill.is_none() && op.end_burst_mult() > 0.0) {
+            r.end_burst_raw = atk * op.end_burst_mult();
+        }
         r
     }
 
@@ -1164,6 +1258,19 @@ impl SimulationEnvironment {
                 };
             }
             self.primary_operator.is_skill_active = false;
+        } else if b.end_burst_raw > 0.0 {
+            // Skill-less Executors (THRM-EX) whose only damage is a talent-driven burst: `b`
+            // (the only state that exists for them) already carries end_burst_raw from
+            // state_rates()'s no-skill carve-out — mitigate it the same way the skill-having
+            // branch above does.
+            let (de, re) = self.mitigation_factors(def, res);
+            let frag = self.primary_operator.fragile();
+            let afrag = self.primary_operator.arts_fragile();
+            end_burst = if b.arts_per_shot > 0.0 {
+                b.end_burst_raw * (1.0 - re / 100.0) * (1.0 + frag + afrag)
+            } else {
+                (b.end_burst_raw - de).max(0.05 * b.atk) * (1.0 + frag)
+            };
         }
 
         self.primary_operator.is_skill_active = saved;
@@ -1188,10 +1295,47 @@ impl SimulationEnvironment {
         self.get_cycle_times_custom(max_time, false, None)
     }
 
+    /// A handful of kits (currently only Amiya (Guard)'s S2 and Amiya (Medic)'s equivalent) are
+    /// explicitly a ONE-TIME execution for the entire battle ("整场战斗中该技能只能释放一次" in
+    /// the raw skill text) rather than a normal SP-cost/cooldown loop — nothing in the structured
+    /// skill data (sp_cost/duration/sp_type all look like an ordinary skill) distinguishes this,
+    /// so without this check the sim would recharge and re-fire it repeatedly over 300s, wildly
+    /// overcounting a skill meant to land once per real match.
+    fn is_once_per_battle_skill(skill: &Skill) -> bool {
+        skill.description.contains("整场战斗中该技能只能释放一次") || skill.description.contains("整场战斗中只能释放一次")
+    }
+
     fn get_cycle_times_custom(&self, max_time: f64, start_with_skill: bool, boss_hit_interval: Option<f64>) -> (f64, f64, f64) {
+        let (t_base, t_skill, n_casts) = self.get_cycle_times_custom_raw(max_time, start_with_skill, boss_hit_interval);
+        if n_casts > 1.0 {
+            if let Some(skill) = &self.primary_operator.equipped_skill {
+                if Self::is_once_per_battle_skill(skill) {
+                    // One cast's worth of skill-active time (the rest of the fight is the base
+                    // state), one cast credited — not `n_casts` worth of burst damage.
+                    let t_skill_one = if n_casts > 0.0 { t_skill / n_casts } else { t_skill };
+                    return (max_time - t_skill_one, t_skill_one, 1.0);
+                }
+            }
+        }
+        (t_base, t_skill, n_casts)
+    }
+
+    fn get_cycle_times_custom_raw(&self, max_time: f64, start_with_skill: bool, boss_hit_interval: Option<f64>) -> (f64, f64, f64) {
         let skill = match &self.primary_operator.equipped_skill {
             Some(s) => s,
-            None => return (max_time, 0.0, 0.0),
+            None => {
+                // Skill-less Executors whose whole kit is a talent-driven "burst on deploy, then
+                // retreat" (THRM-EX) still cycle through a redeploy window even with no skill to
+                // charge — n_casts here feeds the end_burst_raw*n_casts credit in
+                // run_5_minute_sim/run_wave_sim/run_boss_sim, which would otherwise always be 0
+                // for them (n_casts==0 means "never triggers").
+                if self.primary_operator.is_executor() && self.primary_operator.end_burst_mult() > 0.0 {
+                    let cycle = self.primary_operator.final_redeployment_time().max(60.0);
+                    let n_casts = (max_time / cycle).floor();
+                    return (max_time, 0.0, n_casts);
+                }
+                return (max_time, 0.0, 0.0);
+            }
         };
         let cost = skill.sp_cost.max(0.0);
         let init = skill.initial_sp.max(0.0);
@@ -1419,6 +1563,10 @@ impl SimulationEnvironment {
         let infinite = skill.is_infinite_or_toggle();
         let dur = if infinite {
             max_time
+        } else if (self.primary_operator.is_char("char_1001_amiya2") || self.primary_operator.name == "Amiya (Guard)" || (self.primary_operator.name.contains("Amiya") && self.primary_operator.profession == "WARRIOR"))
+            && (skill.name.contains("绝影") || skill.description.contains("绝影") || skill.description.contains("斩击"))
+        {
+            3.5
         } else if skill.duration > 0.0 {
             skill.duration
         } else if buff_dur > 0.0 {
@@ -1633,7 +1781,11 @@ impl SimulationEnvironment {
                     }
                 }
             }
-            if s.duration > 0.0 {
+            if (self.primary_operator.is_char("char_1001_amiya2") || self.primary_operator.name == "Amiya (Guard)" || (self.primary_operator.name.contains("Amiya") && self.primary_operator.profession == "WARRIOR"))
+                && (s.name.contains("绝影") || s.description.contains("绝影") || s.description.contains("斩击"))
+            {
+                3.5
+            } else if s.duration > 0.0 {
                 s.duration.min(60.0)
             } else if b_dur > 0.0 {
                 b_dur.min(60.0)
@@ -1742,20 +1894,34 @@ impl SimulationEnvironment {
             }
         }
 
-        // ---- Leaking: 15s containment window per wave ----
-        let window = 15.0;
-        let leaked_per_wave = if time_to_kill <= window {
-            0.0
-        } else {
-            let killed_in_window = (window / time_to_kill * 10.0).min(10.0);
-            let remaining = 10.0 - killed_in_window;
-            let can_physically_hold = !is_ranged && !is_defeated && block_power >= remaining;
-            if can_physically_hold { 0.0 } else { remaining }
-        };
-        let total_leaks = (leaked_per_wave * 10.0).min(100.0);
+        // ---- Leaking: containment window per wave, ramping down QUADRATICALLY (not linearly)
+        // from a generous 40s opening window to a fast 10s steady-state, with the gap between
+        // waves shrinking the same way from 10s down to 2s. Real stages don't drop all 10
+        // waves' worth of mobs on the lane at a flat, already-fast pace from second 1 — early
+        // waves trickle in with much more travel time before the lane is fully "live", then
+        // the pace ramps up hard toward the end. A flat/linear window for all 10 waves rewards
+        // pure burst/kill-speed the same as a sustained lane holder; this curve stops doing that.
+        // window(i) = 10 + 30*((9-i)/9)^2  ->  40, 33.70, 28.15, 23.33, 19.26, 15.93, 13.33, 11.48, 10.37, 10.0
+        const WAVE_WINDOWS: [f64; 10] = [40.0, 33.70, 28.15, 23.33, 19.26, 15.93, 13.33, 11.48, 10.37, 10.0];
+        // break(i) = 2 + 8*((8-i)/8)^2  ->  10, 8.125, 6.5, 5.125, 4.0, 3.125, 2.5, 2.125, 2.0 (9 gaps)
+        const WAVE_BREAKS: [f64; 9] = [10.0, 8.125, 6.5, 5.125, 4.0, 3.125, 2.5, 2.125, 2.0];
+        let mut total_leaks = 0.0;
+        for window in WAVE_WINDOWS {
+            let leaked_per_wave = if time_to_kill <= window {
+                0.0
+            } else {
+                let killed_in_window = (window / time_to_kill * 10.0).min(10.0);
+                let remaining = 10.0 - killed_in_window;
+                let can_physically_hold = !is_ranged && !is_defeated && block_power >= remaining;
+                if can_physically_hold { 0.0 } else { remaining }
+            };
+            total_leaks += leaked_per_wave;
+        }
+        let total_leaks = total_leaks.min(100.0);
 
-        // 10 waves + 9 breaks of 10s + defeat penalty per wave
-        let raw_time = ((time_to_kill * 10.0) + 90.0 + (wave_defeat_penalty * 10.0)).min(1800.0);
+        // 10 waves + the 9 ramped breaks between them + defeat penalty per wave
+        let total_break_time: f64 = WAVE_BREAKS.iter().sum();
+        let raw_time = ((time_to_kill * 10.0) + total_break_time + (wave_defeat_penalty * 10.0)).min(1800.0);
 
         // Each leaked enemy (out of the 100-enemy onslaught) costs 1% of the clear time on top
         // of the raw speed, e.g. 11/100 leaked -> raw_time * 1.11. This penalized figure is what

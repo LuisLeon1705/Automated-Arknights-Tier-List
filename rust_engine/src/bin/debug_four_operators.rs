@@ -3,8 +3,30 @@ mod core;
 
 fn main() {
     let loader = core::data_loader::DataLoader::new("../data");
-    test_operator(&loader, "Tragodia");
-    test_operator(&loader, "Eunectes");
+    let op_opt = loader.get_operator("THRM-EX");
+    let base_op = op_opt.unwrap();
+    println!("skills.len() = {}", base_op.skills.len());
+    let mut op = base_op.clone();
+    op.change_state(None);
+    println!("is_skill_active = {}", op.is_skill_active);
+    println!("end_burst_mult = {}", op.end_burst_mult());
+
+    let avg_enemy = core::enemy::calculate_average_enemy("../data");
+    let mut target_stats = std::collections::HashMap::new();
+    target_stats.insert("def".to_string(), avg_enemy.def);
+    target_stats.insert("res".to_string(), avg_enemy.res);
+    target_stats.insert("weight".to_string(), avg_enemy.weight);
+    target_stats.insert("atk".to_string(), avg_enemy.atk);
+    target_stats.insert("attack_interval".to_string(), avg_enemy.attack_interval);
+    target_stats.insert("is_boss".to_string(), 0.0);
+
+    let mut sim = core::simulation::SimulationEnvironment::new(op.clone(), None, Some(target_stats));
+    let sr = sim.state_rates();
+    println!("phys_per_shot={} arts_per_shot={} true_per_shot={} end_burst_raw={} attacks_per_sec={}",
+        sr.phys_per_shot, sr.arts_per_shot, sr.true_per_shot, sr.end_burst_raw, sr.attacks_per_sec);
+    let (_dmg_t, _heal_t, _dp_t, _dmg_e, _heal_e, dmg_split) = sim.run_5_minute_sim();
+    println!("phys={} arts={} true={}", dmg_split.get("physical").unwrap_or(&0.0), dmg_split.get("arts").unwrap_or(&0.0), dmg_split.get("true").unwrap_or(&0.0));
+    test_operator(&loader, "Amiya (Guard)");
 }
 
 fn test_operator(loader: &core::data_loader::DataLoader, name: &str) {
@@ -51,8 +73,9 @@ fn test_operator(loader: &core::data_loader::DataLoader, name: &str) {
             sim.primary_operator.calculate_stat("fear_duration"), sim.primary_operator.calculate_stat("slow_duration"),
             sim.primary_operator.calculate_stat("silence_duration"));
         for b in sim.primary_operator.get_active_buffs() {
-            if b.stat.contains("atk_scale") { println!("      buff: {} = {:?}", b.stat, b.value); }
+            println!("      buff: stat='{}' name='{}' val={:?}", b.stat, b.name, b.value);
         }
+        println!("      sub_profession_id='{}'", sim.primary_operator.sub_profession_id);
         sim.primary_operator.is_skill_active = false;
         let (_cycle, _burst_end) = sim.cycle_at(avg_enemy.def, avg_enemy.res);
         let (_dmg_t, _heal_t, _dp_t, _dmg_e, _heal_e, dmg_split) = sim.run_5_minute_sim();
