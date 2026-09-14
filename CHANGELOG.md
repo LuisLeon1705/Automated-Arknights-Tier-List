@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en-GB/1.1.0/) a
 
 ---
 
+## [1.3.5] - Fixed: Cloudflare Tunnel Could Drop Mid-Session with No Recovery (2026-09-13)
+
+### 🐛 Fixed: "Error 1033 — Cloudflare Tunnel error" partway through a run
+- **Root cause**: `cloudflared tunnel --url ...` (the free, no-account "quick tunnel" tier) is Cloudflare's own best-effort service with no uptime guarantee — its edge connection can drop mid-session even though nothing about the setup was wrong. The workflow launched it exactly once at the start and then just slept for the whole requested duration, so a dropped connection anywhere in that window meant the URL was dead for the rest of the run with nothing watching or attempting to recover it.
+- **Fix**: the "stay up" step is now an actual watchdog loop — every 15s it checks both that the cloudflared process is still alive AND that the last-announced URL is still actually reachable (`curl` against it directly, since the process can stay running even after its edge connection has silently dropped), and relaunches + re-announces a fresh URL in the log if either check fails. Also added `--protocol http2` to the cloudflared invocation, a commonly-recommended fix for connectivity issues specifically on cloud CI runners (the default QUIC/UDP protocol is more likely to be blocked/unstable there than plain HTTP/2 over TCP). One real limitation: a quick tunnel has no stable hostname across restarts, so a recovery DOES print a new URL — check the log again if the one you had stops working.
+- Verified the restart/re-announce bash logic in isolation (simulated a mid-session process crash): detected within one 1s check cycle and relaunched cleanly with a fresh announcement.
+
 ## [1.3.4] - Fixed: on-demand-server.yml Failed to Even Start (2026-09-13)
 
 ### 🐛 Fixed: "Invalid workflow file... Unrecognized named-value: 'secrets'"

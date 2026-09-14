@@ -87,32 +87,74 @@ jobs:
             sleep 1
           done
 
-      - name: Open a temporary public tunnel (cloudflared quick tunnel)
+      - name: Download cloudflared
         run: |
           curl -sL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared
           chmod +x /tmp/cloudflared
-          /tmp/cloudflared tunnel --url http://127.0.0.1:8000 --no-autoupdate > /tmp/cloudflared.log 2>&1 &
-          echo $! > /tmp/cloudflared.pid
-          # The quick-tunnel URL shows up in cloudflared's own stderr log within a few seconds.
-          for i in $(seq 1 30); do
-            URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cloudflared.log | head -1)
-            if [ -n "$URL" ]; then
-              echo "############################################################"
-              echo "#  Server is live at: $URL"
-              echo "#  READONLY_MODE is on — Editor tabs are disabled, everything else works."
-              echo "#  Anyone with this URL can reach it for as long as this job runs."
-              echo "############################################################"
-              break
-            fi
-            sleep 1
-          done
 
-      - name: Stay up for the requested duration
+      - name: Open tunnel, then watch it for the requested duration (auto-restart on drop)
+        # Quick tunnels (the free, no-account `trycloudflare.com` kind) are Cloudflare's own
+        # "best-effort, no uptime guarantee" tier — they CAN drop mid-session (Cloudflare error
+        # 1033: the tunnel's DNS entry exists but the connector isn't currently connected). The
+        # old version just launched cloudflared once and hoped; this instead watches the process
+        # for the whole run and relaunches it if it dies, so one dropped connection doesn't kill
+        # the rest of the session — it just means a NEW url gets printed (a quick tunnel has no
+        # stable hostname across restarts; only a paid/named tunnel bound to your own domain would).
+        # `--protocol http2` is a commonly-recommended fix for cloudflared connectivity issues
+        # specifically on cloud CI runners, where the default QUIC/UDP protocol is more likely to
+        # be restricted than plain HTTP/2 over TCP.
         run: |
           MINUTES="${{ github.event.inputs.duration_minutes }}"
           MINUTES="${MINUTES:-60}"
+          DEADLINE=$(( $(date +%s) + MINUTES * 60 ))
+          LAST_URL=""
+
+          start_tunnel() {
+            /tmp/cloudflared tunnel --url http://127.0.0.1:8000 --protocol http2 --no-autoupdate > /tmp/cloudflared.log 2>&1 &
+            echo $! > /tmp/cloudflared.pid
+          }
+
+          announce_url_when_ready() {
+            for i in $(seq 1 30); do
+              URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cloudflared.log | head -1)
+              if [ -n "$URL" ] && [ "$URL" != "$LAST_URL" ]; then
+                LAST_URL="$URL"
+                echo "############################################################"
+                echo "#  Server is live at: $URL"
+                echo "#  READONLY_MODE is on — Editor tabs are disabled, everything else works."
+                echo "#  Anyone with this URL can reach it for as long as this job runs."
+                echo "############################################################"
+                return 0
+              fi
+              sleep 1
+            done
+            echo "cloudflared didn't report a URL within 30s — check /tmp/cloudflared.log below."
+            return 1
+          }
+
+          start_tunnel
+          announce_url_when_ready
+
           echo "Serving for ${MINUTES} minute(s) — cancel this run early from the Actions tab to stop sooner."
-          sleep "$((MINUTES * 60))"
+          while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+            sleep 15
+            # Two different failure modes to catch: the cloudflared PROCESS itself died (kill -0
+            # fails), or it's still running but its edge connection dropped without the process
+            # exiting (Cloudflare error 1033 — the process alone being alive doesn't mean the
+            # tunnel is actually reachable), caught by actually probing the public URL.
+            PROCESS_DEAD=0
+            kill -0 "$(cat /tmp/cloudflared.pid)" 2>/dev/null || PROCESS_DEAD=1
+            URL_DEAD=0
+            if [ "$PROCESS_DEAD" -eq 0 ] && [ -n "$LAST_URL" ]; then
+              curl -s -o /dev/null --max-time 10 "$LAST_URL" || URL_DEAD=1
+            fi
+            if [ "$PROCESS_DEAD" -eq 1 ] || [ "$URL_DEAD" -eq 1 ]; then
+              echo "Tunnel looks dead (process_dead=$PROCESS_DEAD url_unreachable=$URL_DEAD) — restarting..."
+              kill "$(cat /tmp/cloudflared.pid)" 2>/dev/null || true
+              start_tunnel
+              announce_url_when_ready
+            fi
+          done
 
       - name: Stop server and tunnel
         if: always()
