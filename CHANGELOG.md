@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en-GB/1.1.0/) a
 
 ---
 
+## [1.3.6] - Fixed: Gravel (and Anyone Else Using a "cond." Blackboard Key) Wrongly Ranked as a DP Generator (2026-09-14)
+
+### 🐛 Fixed: Gravel — a Specialist with no DP generation in her kit — showed up OP-tier in the DP category
+- **Root cause**: her talent "小个子支援" has a `cond.cost: 10.0` blackboard entry — a CONDITION THRESHOLD ("this DEF buff only applies to allies costing ≤10 DP"), not a value meant to be read as its own stat. `normalize_buff`'s suffix-stripping reduces `"cond.cost"` down to the same bare `"cost"` it uses to detect real DP-generation kits (Vanguards' "gain X DP" skills) — since 10.0 is positive, it got misread as "Gravel generates 10 DP per cast." Combined with her `sp_cost: 0` skills recasting rapidly over the 300s window, that produced a fabricated 100-110 total DP, enough to pass the DP category's `dp > 1.0` filter and land her OP-tier in a role she has nothing to do with.
+- **Fix**: added a guard in `normalize_buff` for any raw key starting with `cond.` — mapped to an explicitly-ignored stat before it ever reaches the generic per-suffix matching (including the `"cost"` branch), rather than trying to enumerate every specific kit that happens to combine a condition threshold with a DP-adjacent stat name. Confirmed live: Gravel no longer appears anywhere in the DP category's 284 rows (previously present at OP tier).
+
 ## [1.3.5] - Fixed: Cloudflare Tunnel Could Drop Mid-Session with No Recovery (2026-09-13)
 
 ### 🐛 Fixed: "Error 1033 — Cloudflare Tunnel error" partway through a run

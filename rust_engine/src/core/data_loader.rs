@@ -32,6 +32,17 @@ fn normalize_buff(raw: &str, val: f64, item_kind: &str, desc: &str) -> (String, 
     let suffix = remove_brackets(suffix0);
     let pct = |v: f64| -> f64 { if v.abs() >= 5.0 { v / 100.0 } else { v } };
 
+    // A "cond.X" key (e.g. Gravel's talent "cond.cost": 10.0, gating her def buff to only units
+    // costing <=10 DP) is a CONDITION THRESHOLD, never a value meant to be applied as the stat
+    // its own suffix names — but nothing upstream of here actually evaluates that condition, so
+    // without this guard "cond.cost" fell through to the same generic "cost" branch below as a
+    // real cost value, and since 10.0 is positive, got misread as "she generates 10 DP per cast".
+    // That's how Gravel — a Specialist with no DP-generation in her kit at all — ended up ranked
+    // (wrongly, as OP tier) in the DP Generators category.
+    if after_at.starts_with("cond.") {
+        return (format!("ignored_condition_threshold_{}", suffix), val, None);
+    }
+
     // Buffs bracket-namespaced to one of the operator's OWN summons/tokens (e.g. Mitm's
     // "trshrb_t_1[trash_born].def" / ".atk", a self-nerf on his spawned debris object) describe
     // that summon's stats, not the operator's own atk/def or an enemy-facing debuff. Since that
