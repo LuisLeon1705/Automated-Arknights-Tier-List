@@ -74,6 +74,13 @@ fn history_entry_dir(data_hash: &str) -> std::path::PathBuf {
 }
 fn team_tierlist_result_path(data_hash: &str) -> std::path::PathBuf { history_entry_dir(data_hash).join("team_tierlist.json") }
 fn operator_tierlist_result_path(data_hash: &str) -> std::path::PathBuf { history_entry_dir(data_hash).join("operator_tierlist.json") }
+/// The deduped, one-row-per-operator-per-category list — same list (and same `tier`, computed
+/// against that smaller population, not the full per-config one) the live Tier List's default
+/// "Best Config Only" view actually shows. Kept separate from `operator_tierlist.json` (every
+/// skill/module config, `tier` computed against THAT much larger population) because the two are
+/// genuinely different rankings, not a subset of one another — see the history entry explaining
+/// why the static snapshot page was reading the wrong one.
+fn operator_tierlist_best_result_path(data_hash: &str) -> std::path::PathBuf { history_entry_dir(data_hash).join("operator_tierlist_best.json") }
 fn enemy_tierlist_result_path(data_hash: &str) -> std::path::PathBuf { history_entry_dir(data_hash).join("enemy_tierlist.json") }
 fn operators_data_snapshot_path(data_hash: &str) -> std::path::PathBuf { history_entry_dir(data_hash).join("operators_data.json") }
 fn enemies_data_snapshot_path(data_hash: &str) -> std::path::PathBuf { history_entry_dir(data_hash).join("enemies_data.json") }
@@ -193,19 +200,28 @@ fn compute_and_cache_operator_tierlist(data_hash: &str) {
     let loader = core::data_loader::DataLoader::new("../data");
     let categories = ["general", "normal", "elite", "boss", "ra", "is", "cc", "dp"];
     let mut all_rows: Vec<Value> = Vec::new();
+    let mut best_rows: Vec<Value> = Vec::new();
     for category in categories {
-        let (_general, mut detailed) = compute_tierlist_for_category(&loader, category, true);
+        let (mut general, mut detailed) = compute_tierlist_for_category(&loader, category, true);
         annotate_metric_ranks(&mut detailed, OPERATOR_RANK_METRICS);
+        annotate_metric_ranks(&mut general, OPERATOR_RANK_METRICS);
         for row in &mut detailed {
             if let Some(obj) = row.as_object_mut() {
                 obj.insert("category".to_string(), serde_json::json!(category));
             }
         }
+        for row in &mut general {
+            if let Some(obj) = row.as_object_mut() {
+                obj.insert("category".to_string(), serde_json::json!(category));
+            }
+        }
         all_rows.extend(detailed);
+        best_rows.extend(general);
     }
     let _ = std::fs::create_dir_all(history_entry_dir(data_hash));
-    if let Ok(body) = serde_json::to_vec(&all_rows) {
+    if let (Ok(body), Ok(best_body)) = (serde_json::to_vec(&all_rows), serde_json::to_vec(&best_rows)) {
         let _ = std::fs::write(operator_tierlist_result_path(data_hash), body);
+        let _ = std::fs::write(operator_tierlist_best_result_path(data_hash), best_body);
         touch_history_entry(data_hash, None, false, true, false, false);
     }
 }
@@ -238,7 +254,10 @@ fn compute_and_cache_enemy_tierlist(data_hash: &str) {
 /// instead of needing its own separate trigger.
 fn ensure_full_history_snapshot(data_hash: &str) {
     snapshot_data_files_if_missing(data_hash);
-    if !operator_tierlist_result_path(data_hash).exists() {
+    // Both files are checked (not just the first) so a cache written before
+    // `operator_tierlist_best.json` existed gets backfilled instead of permanently appearing
+    // "already done" and never recomputing it for a hash that's already on disk.
+    if !operator_tierlist_result_path(data_hash).exists() || !operator_tierlist_best_result_path(data_hash).exists() {
         compute_and_cache_operator_tierlist(data_hash);
     }
     if !enemy_tierlist_result_path(data_hash).exists() {
@@ -385,6 +404,7 @@ async fn main() {
         .route("/api/team_tierlist/history", get(get_team_tierlist_history))
         .route("/api/history/{hash}/team_tierlist", get(get_history_team_tierlist))
         .route("/api/history/{hash}/operators", get(get_history_operator_tierlist))
+        .route("/api/history/{hash}/operators/best", get(get_history_operator_tierlist_best))
         .route("/api/history/{hash}/enemies", get(get_history_enemy_tierlist))
         .route("/api/history/{hash}/data/operators", get(get_history_data_operators))
         .route("/api/history/{hash}/data/enemies", get(get_history_data_enemies))
@@ -2297,6 +2317,17 @@ async fn get_team_tierlist_history() -> impl IntoResponse {
 /// computing in the background, or an unknown hash).
 async fn get_history_operator_tierlist(Path(data_hash): Path<String>) -> axum::response::Response {
     match load_json_from_disk(&operator_tierlist_result_path(&data_hash)) {
+        Some(v) => Json(serde_json::json!({ "data_hash": data_hash, "rows": v })).into_response(),
+        None => (StatusCode::NOT_FOUND, error_page("404", "Not found", "No cached operator Tier List for this data hash yet — it may still be computing in the background, or the hash is unknown.")).into_response(),
+    }
+}
+
+/// The deduped "one row per operator per category" list — matches what the live Tier List's
+/// default "Best Config Only" view shows, `tier` included. Deliberately a DIFFERENT ranking from
+/// `/operators` above (every skill/module config, `tier` computed against that much larger
+/// population) rather than a filtered subset of it — see `operator_tierlist_best_result_path`.
+async fn get_history_operator_tierlist_best(Path(data_hash): Path<String>) -> axum::response::Response {
+    match load_json_from_disk(&operator_tierlist_best_result_path(&data_hash)) {
         Some(v) => Json(serde_json::json!({ "data_hash": data_hash, "rows": v })).into_response(),
         None => (StatusCode::NOT_FOUND, error_page("404", "Not found", "No cached operator Tier List for this data hash yet — it may still be computing in the background, or the hash is unknown.")).into_response(),
     }

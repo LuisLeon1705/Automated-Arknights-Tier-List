@@ -116,20 +116,50 @@ function renderTierGroups(container, rows, nameKey, subLine, imgSrc) {
     container.innerHTML = html || '<div class="hint">No results.</div>';
 }
 
+// The live pages NEVER display the server's precomputed `tier` field directly — both
+// tierlist.html and enemy_tierlist.html always recompute tiers CLIENT-SIDE, percentile-ranked
+// against whatever's currently filtered/sorted, using their own (slightly different from the
+// server's 8-cutoff scheme) cutoffs. Mirroring that here is what actually makes this page's tier
+// groupings match what you see on the live app — using the server's raw `tier` field instead
+// (an earlier version of this page did) looks superficially reasonable but shows a visibly
+// different OP/S/A/etc split, since it's a genuinely different computation.
+function assignOperatorTiers(rows) {
+    // Mirrors templates/tierlist.html's client recompute exactly: sorted by `score` descending,
+    // an "inactive" (score <= 0) config is forced to F, everything else is percentile-ranked
+    // 3/13/30/52/74/88 into OP/S/A/B/C/D/E (no dedicated F bucket for a real, just-low score).
+    const active = rows.filter(r => (r.score || 0) > 0.001);
+    const inactive = rows.filter(r => (r.score || 0) <= 0.001);
+    active.sort((a, b) => (b.score || 0) - (a.score || 0));
+    const n = active.length;
+    active.forEach((r, idx) => {
+        const pct = (idx + 1) / n;
+        r.tier = pct <= 0.03 ? 'OP' : pct <= 0.13 ? 'S' : pct <= 0.30 ? 'A' : pct <= 0.52 ? 'B' : pct <= 0.74 ? 'C' : pct <= 0.88 ? 'D' : 'E';
+    });
+    inactive.forEach(r => { r.tier = 'F'; });
+    return [...active, ...inactive];
+}
+
+function assignEnemyTiers(rows) {
+    // Mirrors templates/enemy_tierlist.html's client recompute: sorted by `threat_score`
+    // descending, percentile-ranked 3/12/28/50/72/86/95 into OP/S/A/B/C/D/E/F (this one DOES
+    // have a real F bucket, no separate "inactive" pre-filter).
+    const sorted = [...rows].sort((a, b) => (b.threat_score || 0) - (a.threat_score || 0));
+    const n = sorted.length;
+    sorted.forEach((r, idx) => {
+        const pct = (idx + 1) / n;
+        r.tier = pct <= 0.03 ? 'OP' : pct <= 0.12 ? 'S' : pct <= 0.28 ? 'A' : pct <= 0.50 ? 'B' : pct <= 0.72 ? 'C' : pct <= 0.86 ? 'D' : pct <= 0.95 ? 'E' : 'F';
+    });
+    return sorted;
+}
+
 function renderOperators() {
     const cat = document.getElementById('op-category').value;
     const term = document.getElementById('op-search').value.toLowerCase();
-    // The cached data is per-skill/module CONFIG (every combo), not deduped — keep only each
-    // operator's single best-scoring config within the chosen category, same as the live Tier
-    // List's default "Best Config Only" view.
-    const byOp = {};
-    for (const r of opRows) {
-        if (r.category !== cat) continue;
-        if (term && !r.operator_name.toLowerCase().includes(term)) continue;
-        const existing = byOp[r.operator_name];
-        if (!existing || (r.score || 0) > (existing.score || 0)) byOp[r.operator_name] = r;
-    }
-    const rows = Object.values(byOp).sort((a, b) => (b.score || 0) - (a.score || 0));
+    // `opRows` is the deduped "best config per operator" list (`operator_tierlist_best.json`) —
+    // matches the live Tier List's default "Best Config Only" view (one row per operator, not
+    // every skill/module combo).
+    const filtered = opRows.filter(r => r.category === cat && (!term || r.operator_name.toLowerCase().includes(term)));
+    const rows = assignOperatorTiers(filtered);
     renderTierGroups(document.getElementById('op-results'), rows, 'operator_name',
         r => `${CLASS_LABEL[r.profession] || r.profession} · ${r.skill_tag || ''} ${r.module_tag || ''}`,
         r => r.photo_path ? `images/${r.photo_path}` : null);
@@ -138,8 +168,8 @@ function renderOperators() {
 function renderEnemies() {
     const cat = document.getElementById('enemy-category').value;
     const term = document.getElementById('enemy-search').value.toLowerCase();
-    const rows = enemyRows.filter(r => r.category === cat && (!term || (r.name || '').toLowerCase().includes(term)));
-    rows.sort((a, b) => (b.threat_score || 0) - (a.threat_score || 0));
+    const filtered = enemyRows.filter(r => r.category === cat && (!term || (r.name || '').toLowerCase().includes(term)));
+    const rows = assignEnemyTiers(filtered);
     renderTierGroups(document.getElementById('enemy-results'), rows, 'name',
         r => `${(r.tier_type || r.tier || '').toUpperCase()} · ${Math.round(r.threat_score || 0).toLocaleString()} threat`,
         r => r.id ? `images/enemies/${r.id}.png` : null);
@@ -151,7 +181,7 @@ async function init() {
         document.getElementById('snapshot-time').innerText = new Date(meta.computed_at * 1000).toLocaleString();
     }
 
-    const opData = await fetch('operator_tierlist.json').then(r => r.json()).catch(() => ({ rows: [] }));
+    const opData = await fetch('operator_tierlist_best.json').then(r => r.json()).catch(() => ({ rows: [] }));
     opRows = opData.rows || opData;
     const opCats = [...new Set(opRows.map(r => r.category))];
     document.getElementById('op-category').innerHTML = opCats.map(c => `<option value="${c}">${c.toUpperCase()}</option>`).join('');

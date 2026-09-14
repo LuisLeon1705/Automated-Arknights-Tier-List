@@ -68,7 +68,7 @@ jobs:
           echo "DATA_HASH=$DATA_HASH" >> "$GITHUB_ENV"
           echo "Data hash: $DATA_HASH — waiting for the background snapshot to finish..."
           for i in $(seq 1 180); do
-            if [ -f "../data/cache/$DATA_HASH/operator_tierlist.json" ] && [ -f "../data/cache/$DATA_HASH/enemy_tierlist.json" ]; then
+            if [ -f "../data/cache/$DATA_HASH/operator_tierlist_best.json" ] && [ -f "../data/cache/$DATA_HASH/enemy_tierlist.json" ]; then
               echo "Snapshot ready after ~${i}s."
               break
             fi
@@ -83,14 +83,19 @@ jobs:
         run: |
           mkdir -p public/images
           cp static_site/index.html public/index.html
-          cp "data/cache/$DATA_HASH/operator_tierlist.json" public/operator_tierlist.json
+          # `operator_tierlist_best.json` — the deduped, one-row-per-operator list with `tier`
+          # computed against THAT population, matching what the live Tier List's "Best Config
+          # Only" view shows. NOT `operator_tierlist.json` (every skill/module config, `tier`
+          # computed against that much larger population) — that mismatch was exactly why this
+          # page's tier groupings didn't match the live app's.
+          cp "data/cache/$DATA_HASH/operator_tierlist_best.json" public/operator_tierlist_best.json
           cp "data/cache/$DATA_HASH/enemy_tierlist.json" public/enemy_tierlist.json
           # Only the portraits the snapshot actually references get copied — the full
           # static/images/ folder (operators + every enemy) is ~90MB, most of it irrelevant to
           # any single build, and Pages has its own size ceiling worth not eating into for nothing.
           python3 - <<'PY'
           import json, shutil, os
-          for src_name, dst_sub, key in [("operator_tierlist.json", "", "photo_path"), ("enemy_tierlist.json", "enemies", "id")]:
+          for src_name, dst_sub, key in [("operator_tierlist_best.json", "", "photo_path"), ("enemy_tierlist.json", "enemies", "id")]:
               with open(f"public/{src_name}", encoding="utf-8") as f:
                   rows = json.load(f)
               names = set()

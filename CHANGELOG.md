@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en-GB/1.1.0/) a
 
 ---
 
+## [1.3.7] - Fixed: Static Snapshot's Tier Groupings Didn't Match the Live App (2026-09-14)
+
+### 🐛 Fixed: the published Pages snapshot showed different OP/S/A/... groupings than `/tierlist`
+- **Root cause, part 1**: `compute_tierlist_for_category` computes `tier` TWICE per category — once against the ~3,000-row "every skill/module config" population, once separately against the ~439-row deduped "best config per operator" population — same percentile cutoffs, different populations, so the same operator can land a different tier depending on which list reads it. The static snapshot's cache was built from the first (detailed) list; the live app's default "Best Config Only" view reads the second (deduped). Added a second cached file, `operator_tierlist_best.json` (and a matching `GET /api/history/{hash}/operators/best` endpoint), computed from the correctly-scoped deduped list, and pointed the static site + publish workflow at it instead.
+- **Root cause, part 2, the bigger one**: neither `tierlist.html` nor `enemy_tierlist.html` actually display the server's precomputed `tier` field AT ALL — both always recompute tiers CLIENT-SIDE, percentile-ranked against whatever's currently filtered/sorted, using their own cutoffs (operators: 3/13/30/52/74/88, no dedicated F bucket for a real low score, only for an inactive/zero one; enemies: 3/12/28/50/72/86/95, with a real F bucket) — genuinely different math from the server's 8-cutoff scheme (2.5/11/27/49/71/86/95) part 1 was chasing. The static page was always going to look different no matter which cached list it read, because it was computing tiers a different way entirely.
+- **Fix**: `static_site/index.html` now replicates BOTH pages' exact client-side percentile algorithms (`assignOperatorTiers`/`assignEnemyTiers`) instead of trusting any precomputed `tier` field, so what it shows is the literal same computation the live app runs in your browser. Confirmed against today's live data: both the static page and a live-data client-style recompute independently produce **OP (12)** for General — the "OP (32)" in the original bug report was from before this session's several balance fixes shifted the score distribution, not an actual live-vs-static mismatch.
+
 ## [1.3.6] - Fixed: Gravel (and Anyone Else Using a "cond." Blackboard Key) Wrongly Ranked as a DP Generator (2026-09-14)
 
 ### 🐛 Fixed: Gravel — a Specialist with no DP generation in her kit — showed up OP-tier in the DP category
