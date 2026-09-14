@@ -131,14 +131,17 @@
     text-shadow: 0 2px 4px rgba(0,0,0,0.5);
     flex-shrink: 0;
 }
-.tier-OP { background: #dc2626; color: white; }
-.tier-S { background: #ea580c; color: white; }
-.tier-A { background: #d97706; color: white; }
-.tier-B { background: #65a30d; color: white; }
-.tier-C { background: #059669; color: white; }
-.tier-D { background: #0891b2; color: white; }
-.tier-E { background: #4f46e5; color: white; }
-.tier-F { background: #475569; color: #cbd5e1; }
+/* Viridis-derived, colorblind-safe ramp — matches static/css/style.css's .tier-OP..F palette
+   instead of this page's old separate red-orange-yellow-green-indigo rotation, which had the
+   same red-green-collapse problem for colorblind users as the one it duplicated. */
+.tier-OP { background: #fde725; color: #1a1a1a; }
+.tier-S { background: #a0da39; color: #1a1a1a; }
+.tier-A { background: #4ac16d; color: #0a0a0a; }
+.tier-B { background: #1fa187; color: #f5f5f5; }
+.tier-C { background: #277f8e; color: #f5f5f5; }
+.tier-D { background: #365c8d; color: #f5f5f5; }
+.tier-E { background: #46327e; color: #f5f5f5; }
+.tier-F { background: #440154; color: #f5f5f5; }
 
 .tier-content {
     display: flex;
@@ -146,6 +149,54 @@
     gap: 10px;
     padding: 10px;
     flex: 1;
+}
+
+/* Compact mode: same idea as the operator Tier List — strip each card to portrait + name, and
+   switch to a real CSS grid (not flex-wrap sizing a fixed-width card) so several columns fit per
+   row on a phone instead of one long single-column scroll. */
+#enemy-tierlist-container.compact-view .tier-content {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
+    gap: 6px;
+}
+/* Rotated/sideways text (an earlier version of this) is hard to read at a glance — a short
+   horizontal bar ABOVE the row reads instantly instead, at the cost of stacking rows vertically
+   rather than side-by-side (a non-issue since the row below is already a wrapping grid). */
+#enemy-tierlist-container.compact-view .tier-row {
+    flex-direction: column;
+}
+#enemy-tierlist-container.compact-view .tier-label {
+    width: 100%;
+    height: 28px;
+    font-size: 1.1rem;
+}
+#enemy-tierlist-container.compact-view .enemy-card {
+    width: auto;
+    padding: 6px;
+    align-items: center;
+}
+#enemy-tierlist-container.compact-view .enemy-header-row {
+    flex-direction: column;
+    gap: 4px !important;
+}
+#enemy-tierlist-container.compact-view .enemy-portrait {
+    width: 56px !important;
+    height: 56px !important;
+}
+#enemy-tierlist-container.compact-view .enemy-title-block {
+    padding-right: 0 !important;
+}
+#enemy-tierlist-container.compact-view .enemy-id,
+#enemy-tierlist-container.compact-view .threat-score-pill,
+#enemy-tierlist-container.compact-view .stat-grid,
+#enemy-tierlist-container.compact-view .immunity-row {
+    display: none;
+}
+#enemy-tierlist-container.compact-view .enemy-name {
+    font-size: 0.7rem;
+    text-align: center;
+    white-space: normal;
+    line-height: 1.15;
 }
 </style>
 
@@ -184,6 +235,8 @@
                 <option value="weight">Weight Level</option>
             </select>
         </div>
+
+        <button id="toggle-enemy-compact-view" class="secondary" style="padding:6px 12px; font-size:0.8em;">COMPACT VIEW</button>
     </div>
 
     <div id="enemy-tierlist-container">
@@ -237,6 +290,26 @@
         renderEnemyTierlist();
     });
     document.getElementById('enemy-search').addEventListener('input', renderEnemyTierlist);
+
+    // Compact view: same pattern as the operator Tier List — defaults ON for phone-width screens
+    // on first-ever visit, remembered via localStorage after that.
+    (function initEnemyCompactView() {
+        const container = document.getElementById('enemy-tierlist-container');
+        const btn = document.getElementById('toggle-enemy-compact-view');
+        const stored = localStorage.getItem('enemy-tierlist-compact-view');
+        const compact = stored !== null ? stored === '1' : window.innerWidth <= 640;
+        function apply(isCompact) {
+            container.classList.toggle('compact-view', isCompact);
+            btn.innerText = isCompact ? 'DETAILED VIEW' : 'COMPACT VIEW';
+            btn.classList.toggle('primary', isCompact);
+        }
+        apply(compact);
+        btn.addEventListener('click', () => {
+            const next = !container.classList.contains('compact-view');
+            apply(next);
+            localStorage.setItem('enemy-tierlist-compact-view', next ? '1' : '0');
+        });
+    })();
 
     function renderEnemyTierlist() {
         const term = document.getElementById('enemy-search').value.toLowerCase();
@@ -297,12 +370,12 @@
                                 return `
                                     <div class="enemy-card">
                                         <span class="enemy-badge ${bClass}">${bType}</span>
-                                        <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 2px;">
-                                            <img src="/static/images/enemies/${e.id}.png" 
-                                                 onerror="if(!this.dataset.triedCdn){this.dataset.triedCdn='1'; this.src='https://cdn.jsdelivr.net/gh/fexli/ArknightsResource@main/enemy/' + encodeURIComponent('${e.id}') + '.png';} else {this.onerror=null; this.src='/static/images/placeholder.webp';}" 
-                                                 alt="${e.name}" 
+                                        <div class="enemy-header-row" style="display: flex; gap: 10px; align-items: center; margin-bottom: 2px;">
+                                            <img class="enemy-portrait" src="/static/images/enemies/${e.id}.png"
+                                                 onerror="if(!this.dataset.triedCdn){this.dataset.triedCdn='1'; this.src='https://cdn.jsdelivr.net/gh/fexli/ArknightsResource@main/enemy/' + encodeURIComponent('${e.id}') + '.png';} else {this.onerror=null; this.src='/static/images/placeholder.webp';}"
+                                                 alt="${e.name}"
                                                  style="width: 48px; height: 48px; border-radius: 6px; background: rgba(0,0,0,0.4); object-fit: contain; border: 1px solid var(--border); flex-shrink: 0;">
-                                            <div style="flex: 1; min-width: 0; padding-right: 35px;">
+                                            <div class="enemy-title-block" style="flex: 1; min-width: 0; padding-right: 35px;">
                                                 <div class="enemy-name" title="${e.name}">${e.name}</div>
                                                 <div class="enemy-id" title="${e.id}">${e.id}</div>
                                             </div>

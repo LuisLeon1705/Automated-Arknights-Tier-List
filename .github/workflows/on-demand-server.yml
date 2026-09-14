@@ -1,0 +1,89 @@
+name: On-Demand Server
+
+# Manually-triggered only — this is meant to run for a while when you actually want to use the
+# Team Builder/"team fixer" from another device, not sit there 24/7. Trigger it from the Actions
+# tab (or `gh workflow run on-demand-server.yml`), grab the URL from the run's log, use it, and
+# either let it time out or cancel the run when you're done. Nothing stays running afterward —
+# the server and its tunnel both die the moment the job ends.
+on:
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: "How long to keep the server up (minutes, max ~340 — GitHub Actions caps a job at 360 on the free tier)"
+        required: false
+        default: "60"
+
+jobs:
+  serve:
+    runs-on: ubuntu-latest
+    # Hard ceiling matching the input, capped below GitHub's own 360-minute job limit — if
+    # `duration_minutes` is set too high the job just gets cut off here instead of silently
+    # running to GitHub's own limit.
+    timeout-minutes: 340
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cache cargo/target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust_engine/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust_engine/Cargo.lock') }}
+
+      - name: Build (release)
+        working-directory: rust_engine
+        run: cargo build --release --bin rust_engine
+
+      - name: Start server (READONLY_MODE — this URL is about to be public)
+        working-directory: rust_engine
+        env:
+          READONLY_MODE: "1"
+          PORT: "8000"
+        run: |
+          ./target/release/rust_engine &
+          echo $! > /tmp/server.pid
+          for i in $(seq 1 30); do
+            curl -s -o /dev/null http://127.0.0.1:8000/ && break
+            sleep 1
+          done
+
+      - name: Open a temporary public tunnel (cloudflared quick tunnel)
+        run: |
+          curl -sL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared
+          chmod +x /tmp/cloudflared
+          /tmp/cloudflared tunnel --url http://127.0.0.1:8000 --no-autoupdate > /tmp/cloudflared.log 2>&1 &
+          echo $! > /tmp/cloudflared.pid
+          # The quick-tunnel URL shows up in cloudflared's own stderr log within a few seconds.
+          for i in $(seq 1 30); do
+            URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cloudflared.log | head -1)
+            if [ -n "$URL" ]; then
+              echo "############################################################"
+              echo "#  Server is live at: $URL"
+              echo "#  READONLY_MODE is on — Editor tabs are disabled, everything else works."
+              echo "#  Anyone with this URL can reach it for as long as this job runs."
+              echo "############################################################"
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Stay up for the requested duration
+        run: |
+          MINUTES="${{ github.event.inputs.duration_minutes }}"
+          MINUTES="${MINUTES:-60}"
+          echo "Serving for ${MINUTES} minute(s) — cancel this run early from the Actions tab to stop sooner."
+          sleep "$((MINUTES * 60))"
+
+      - name: Stop server and tunnel
+        if: always()
+        run: |
+          kill "$(cat /tmp/server.pid)" 2>/dev/null || true
+          kill "$(cat /tmp/cloudflared.pid)" 2>/dev/null || true

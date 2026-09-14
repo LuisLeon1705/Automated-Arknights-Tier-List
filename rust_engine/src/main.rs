@@ -3,22 +3,24 @@
 use rayon::prelude::*;
 use axum::{
     extract::{Path, Query, State},
+    http::StatusCode,
     response::{Html, IntoResponse},
     routing::{get, post, delete},
     Json, Router,
 };
 use serde::Deserialize;
 use tokio::net::TcpListener;
-use tower_http::services::ServeDir;
+use tower_http::{catch_panic::CatchPanicLayer, services::ServeDir};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::time::Duration;
 
 mod core;
 
 #[derive(Clone)]
 struct TeamTierlistCache {
     teams: Vec<Value>,
-    data_signature: u64,
+    data_hash: String,
 }
 
 #[derive(Clone)]
@@ -26,23 +28,329 @@ struct AppState {
     team_tierlist_cache: std::sync::Arc<tokio::sync::RwLock<Option<TeamTierlistCache>>>,
 }
 
-/// A cheap "did the roster change" fingerprint — the operator data files' modified-time plus
-/// their byte length, hashed. Used so the Team Tier List auto-regenerates the next time it's
-/// requested after `data/Automated_Operators.json` (or `operators.json`) changes — e.g. after
-/// new operators are added or the Operator Editor saves an edit — instead of silently serving a
-/// stale cache forever until someone remembers to hit Recalculate.
-fn operators_data_signature() -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for path in ["../data/Automated_Operators.json", "../data/operators.json"] {
-        if let Ok(meta) = std::fs::metadata(path) {
-            meta.len().hash(&mut hasher);
-            if let Ok(modified) = meta.modified() {
-                modified.hash(&mut hasher);
-            }
+/// FNV-1a 64-bit — a small, dependency-free, deterministic hash (same bytes in -> same digest
+/// out, on any machine/Rust version/OS). Used instead of `std::collections::hash_map::DefaultHasher`
+/// (whose docs explicitly say the algorithm can change between Rust versions/platforms) because
+/// this hash needs to stay stable as a cache-file NAME and history key across runs/environments —
+/// including a future CI/GitHub Actions run on a totally different machine than whatever computed
+/// it originally.
+fn fnv1a_hash(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+/// A content-addressed ID for "the exact roster + enemy data this was computed from" — hashes
+/// the actual bytes of both data files (not just mtime/size, which resets on every fresh
+/// checkout and would never hit on a second machine) so identical data always produces the same
+/// ID, on this machine or any other. This is what makes on-disk result caching possible: a
+/// result file named by this hash can be reused across restarts, and later across CI runs,
+/// without ever needing to recompute unless the underlying data actually changed.
+fn operators_data_hash() -> String {
+    let mut bytes = Vec::new();
+    for path in ["../data/Automated_Operators.json", "../data/Automated_Enemies.json"] {
+        if let Ok(contents) = std::fs::read(path) {
+            bytes.extend_from_slice(path.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(&contents);
+            bytes.push(0);
         }
     }
-    hasher.finish()
+    format!("{:016x}", fnv1a_hash(&bytes))
+}
+
+const HISTORY_CACHE_DIR: &str = "../data/cache";
+
+/// Everything this app can compute from ONE (operators, enemies) data pair lives together under
+/// `data/cache/<data_hash>/` — the Team Tier List result, the full operator Tier List cross-tab
+/// (all 8 categories), the full enemy Tier List cross-tab (all 4 categories), and a snapshot of
+/// the raw data files themselves, so a historical entry is fully self-contained and reproducible
+/// even if the live data files move on to something else later.
+fn history_entry_dir(data_hash: &str) -> std::path::PathBuf {
+    std::path::Path::new(HISTORY_CACHE_DIR).join(data_hash)
+}
+fn team_tierlist_result_path(data_hash: &str) -> std::path::PathBuf { history_entry_dir(data_hash).join("team_tierlist.json") }
+fn operator_tierlist_result_path(data_hash: &str) -> std::path::PathBuf { history_entry_dir(data_hash).join("operator_tierlist.json") }
+fn enemy_tierlist_result_path(data_hash: &str) -> std::path::PathBuf { history_entry_dir(data_hash).join("enemy_tierlist.json") }
+fn operators_data_snapshot_path(data_hash: &str) -> std::path::PathBuf { history_entry_dir(data_hash).join("operators_data.json") }
+fn enemies_data_snapshot_path(data_hash: &str) -> std::path::PathBuf { history_entry_dir(data_hash).join("enemies_data.json") }
+
+/// One line of the on-disk cache's history index (`data/cache/history.json`) — a lightweight
+/// record of every distinct dataset this has ever computed anything for, newest first. Doesn't
+/// carry the actual results (those are in the matching `<data_hash>/*.json` files) so browsing
+/// history stays cheap even after many entries accumulate; the `has_*` flags let a client know
+/// which pieces are actually available to fetch for that entry without a round-trip per piece.
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct HistoryEntry {
+    data_hash: String,
+    computed_at: String,
+    team_count: usize,
+    #[serde(default)]
+    has_team_tierlist: bool,
+    #[serde(default)]
+    has_operator_tierlist: bool,
+    #[serde(default)]
+    has_enemy_tierlist: bool,
+    #[serde(default)]
+    has_data_snapshot: bool,
+}
+
+fn load_history() -> Vec<HistoryEntry> {
+    let path = std::path::Path::new(HISTORY_CACHE_DIR).join("history.json");
+    std::fs::read(&path).ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn load_json_from_disk(path: &std::path::Path) -> Option<Value> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn load_team_tierlist_from_disk(data_hash: &str) -> Option<Vec<Value>> {
+    let bytes = std::fs::read(team_tierlist_result_path(data_hash)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Records/updates one dataset's history row — merges into any existing entry for this hash
+/// (e.g. the Team Tier List gets computed first, then the operator/enemy snapshots follow) rather
+/// than creating duplicate rows, and never clears a flag that was already true.
+fn touch_history_entry(data_hash: &str, team_count: Option<usize>, has_team: bool, has_ops: bool, has_enemies: bool, has_snapshot: bool) {
+    let _ = std::fs::create_dir_all(HISTORY_CACHE_DIR);
+    let mut history = load_history();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let computed_at = format!("{}", now);
+
+    if let Some(existing) = history.iter_mut().find(|e| e.data_hash == data_hash) {
+        existing.computed_at = computed_at;
+        existing.has_team_tierlist |= has_team;
+        existing.has_operator_tierlist |= has_ops;
+        existing.has_enemy_tierlist |= has_enemies;
+        existing.has_data_snapshot |= has_snapshot;
+        if let Some(tc) = team_count { existing.team_count = tc; }
+    } else {
+        history.insert(0, HistoryEntry {
+            data_hash: data_hash.to_string(),
+            computed_at,
+            team_count: team_count.unwrap_or(0),
+            has_team_tierlist: has_team,
+            has_operator_tierlist: has_ops,
+            has_enemy_tierlist: has_enemies,
+            has_data_snapshot: has_snapshot,
+        });
+    }
+    // Move the touched entry to the front (newest first) regardless of whether it was new.
+    if let Some(idx) = history.iter().position(|e| e.data_hash == data_hash) {
+        let entry = history.remove(idx);
+        history.insert(0, entry);
+    }
+    history.truncate(200); // history is a convenience log, not an unbounded archive
+    if let Ok(body) = serde_json::to_vec_pretty(&history) {
+        let _ = std::fs::write(std::path::Path::new(HISTORY_CACHE_DIR).join("history.json"), body);
+    }
+}
+
+/// Persists a freshly-computed Team Tier List result to disk (so a future run — this process
+/// restarting, or a completely different machine given the same data — never has to redo this
+/// work) and records it in the history index.
+fn save_team_tierlist_to_disk(data_hash: &str, teams: &[Value]) {
+    let _ = std::fs::create_dir_all(history_entry_dir(data_hash));
+    if let Ok(body) = serde_json::to_vec_pretty(teams) {
+        let _ = std::fs::write(team_tierlist_result_path(data_hash), body);
+    }
+    touch_history_entry(data_hash, Some(teams.len()), true, false, false, false);
+}
+
+/// Snapshots the raw operator/enemy data files this hash was computed from, so a historical entry
+/// stays fully reproducible even after the live data files change. Cheap (a couple of file
+/// copies) and idempotent — skipped if this hash's snapshot already exists.
+fn snapshot_data_files_if_missing(data_hash: &str) {
+    let ops_path = operators_data_snapshot_path(data_hash);
+    let enemies_path = enemies_data_snapshot_path(data_hash);
+    if ops_path.exists() && enemies_path.exists() { return; }
+    let _ = std::fs::create_dir_all(history_entry_dir(data_hash));
+    if let Ok(bytes) = std::fs::read("../data/Automated_Operators.json") {
+        let _ = std::fs::write(&ops_path, bytes);
+    }
+    if let Ok(bytes) = std::fs::read("../data/Automated_Enemies.json") {
+        let _ = std::fs::write(&enemies_path, bytes);
+    }
+    touch_history_entry(data_hash, None, false, false, false, ops_path.exists() && enemies_path.exists());
+}
+
+/// Computes the full operator Tier List cross-tab (all 8 target categories, each row annotated
+/// with its rank/tier on every one of the 17 ranking metrics — the same data the "export all
+/// categories" CSV is built from) and caches it to disk under this data hash. Expensive (roughly
+/// the cost of 8 full-roster tier list passes), so this should only ever run once per distinct
+/// dataset — callers should check `operator_tierlist_result_path` / the history index first.
+fn compute_and_cache_operator_tierlist(data_hash: &str) {
+    let loader = core::data_loader::DataLoader::new("../data");
+    let categories = ["general", "normal", "elite", "boss", "ra", "is", "cc", "dp"];
+    let mut all_rows: Vec<Value> = Vec::new();
+    for category in categories {
+        let (_general, mut detailed) = compute_tierlist_for_category(&loader, category, true);
+        annotate_metric_ranks(&mut detailed, OPERATOR_RANK_METRICS);
+        for row in &mut detailed {
+            if let Some(obj) = row.as_object_mut() {
+                obj.insert("category".to_string(), serde_json::json!(category));
+            }
+        }
+        all_rows.extend(detailed);
+    }
+    let _ = std::fs::create_dir_all(history_entry_dir(data_hash));
+    if let Ok(body) = serde_json::to_vec(&all_rows) {
+        let _ = std::fs::write(operator_tierlist_result_path(data_hash), body);
+        touch_history_entry(data_hash, None, false, true, false, false);
+    }
+}
+
+/// Same idea as `compute_and_cache_operator_tierlist`, for the enemy Tier List's 4 threat classes
+/// × 8 ranking metrics cross-tab.
+fn compute_and_cache_enemy_tierlist(data_hash: &str) {
+    let categories = ["all", "boss", "elite", "normal"];
+    let mut all_rows: Vec<Value> = Vec::new();
+    for category in categories {
+        let (mut enemies, _resolved) = compute_enemy_tierlist(category);
+        annotate_metric_ranks(&mut enemies, ENEMY_RANK_METRICS);
+        for row in &mut enemies {
+            if let Some(obj) = row.as_object_mut() {
+                obj.insert("category".to_string(), serde_json::json!(category));
+            }
+        }
+        all_rows.extend(enemies);
+    }
+    let _ = std::fs::create_dir_all(history_entry_dir(data_hash));
+    if let Ok(body) = serde_json::to_vec(&all_rows) {
+        let _ = std::fs::write(enemy_tierlist_result_path(data_hash), body);
+        touch_history_entry(data_hash, None, false, false, true, false);
+    }
+}
+
+/// Runs every piece of the history snapshot that isn't already on disk for this hash. Meant to be
+/// called from a `spawn_blocking` context (it does real simulation work) after the Team Tier
+/// List's own compute/cache path, piggybacking on the same "this is a brand-new dataset" moment
+/// instead of needing its own separate trigger.
+fn ensure_full_history_snapshot(data_hash: &str) {
+    snapshot_data_files_if_missing(data_hash);
+    if !operator_tierlist_result_path(data_hash).exists() {
+        compute_and_cache_operator_tierlist(data_hash);
+    }
+    if !enemy_tierlist_result_path(data_hash).exists() {
+        compute_and_cache_enemy_tierlist(data_hash);
+    }
+}
+
+/// Shared dark-themed shell for error responses (404/408/500) — deliberately NOT routed through
+/// Minijinja (which needs the template loader/app state set up correctly to render anything at
+/// all): an error page is exactly the response that has to work even when something upstream is
+/// broken, so it's a plain, dependency-free HTML string.
+fn error_page(code: &str, title: &str, message: &str) -> Html<String> {
+    Html(format!(
+        r#"<!doctype html>
+<html><head><meta charset="utf-8"><title>{code} - {title}</title>
+<style>
+body {{ background:#0a0a0a; color:#e5e5e5; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; display:flex; align-items:center; justify-content:center; height:100vh; margin:0; }}
+.box {{ text-align:center; max-width:480px; padding:24px; }}
+.code {{ font-size:3rem; color:#ef4444; font-weight:700; margin-bottom:4px; }}
+.title {{ font-size:1.25rem; margin:8px 0; color:#38bdf8; }}
+.msg {{ color:#94a3b8; font-size:0.9rem; line-height:1.5; }}
+a {{ color:#38bdf8; text-decoration:none; }}
+a:hover {{ text-decoration:underline; }}
+</style></head>
+<body><div class="box">
+<div class="code">{code}</div>
+<div class="title">{title}</div>
+<div class="msg">{message}</div>
+<p><a href="/">&larr; Back to home</a></p>
+</div></body></html>"#
+    ))
+}
+
+/// Set `READONLY_MODE=1` (or `true`) in the environment to disable the Operator/Enemy Editor —
+/// intended for a public deployment where editing shouldn't be exposed to random visitors.
+fn is_readonly_deploy() -> bool {
+    std::env::var("READONLY_MODE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+async fn block_if_readonly(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    if is_readonly_deploy() {
+        return (
+            StatusCode::FORBIDDEN,
+            error_page(
+                "403",
+                "Función no accesible actualmente",
+                "El Editor de Operadores/Enemigos está deshabilitado en este despliegue público. Ejecuta el proyecto localmente para usar esta función.",
+            ),
+        ).into_response();
+    }
+    next.run(req).await
+}
+
+/// A handful of cheap, no-downside response headers: `X-Content-Type-Options` stops a browser
+/// from ever "helpfully" re-sniffing a response as something more dangerous than its declared
+/// Content-Type (relevant given `/static` serves user-uploaded operator photos), `X-Frame-Options`
+/// blocks this site being iframed into someone else's page (clickjacking), and `Referrer-Policy`
+/// keeps this site's own URLs out of the `Referer` header sent to whatever a link is clicked to.
+async fn add_security_headers(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    let mut res = next.run(req).await;
+    let headers = res.headers_mut();
+    headers.insert(axum::http::header::X_CONTENT_TYPE_OPTIONS, axum::http::HeaderValue::from_static("nosniff"));
+    headers.insert(axum::http::header::X_FRAME_OPTIONS, axum::http::HeaderValue::from_static("DENY"));
+    headers.insert(axum::http::header::REFERRER_POLICY, axum::http::HeaderValue::from_static("strict-origin-when-cross-origin"));
+    res
+}
+
+async fn fallback_404() -> impl IntoResponse {
+    (
+        StatusCode::NOT_FOUND,
+        error_page("404", "Page not found", "The page you're looking for doesn't exist, or the link is broken."),
+    )
+}
+
+/// Turns a `tower::timeout::TimeoutLayer` expiry (or any other unhandled layer error) into an
+/// actual response instead of axum's default opaque 500 — needed so a single request that's
+/// stuck (or a compute-heavy request piling up behind the concurrency limit below) fails
+/// cleanly with a real status code rather than hanging the connection or crashing the process,
+/// which matters a lot more once this runs unattended in CI than it does run locally.
+async fn handle_layer_error(err: axum::BoxError) -> impl IntoResponse {
+    if err.is::<tower::timeout::error::Elapsed>() {
+        (
+            StatusCode::REQUEST_TIMEOUT,
+            error_page("408", "Request timed out", "This took too long to process (30s limit) — likely a heavy computation under load. Try again shortly."),
+        )
+    } else {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            error_page("500", "Something went wrong", &format!("Unhandled server error: {err}")),
+        )
+    }
+}
+
+/// A panicking handler (an unexpected `.unwrap()` on malformed data, an out-of-bounds index,
+/// etc.) would otherwise kill the whole Tokio task — `axum::serve` survives it, but the ONE
+/// request gets nothing back and the panic message only ever reaches the process's own stderr.
+/// In an unattended context (a GitHub Actions run with nobody watching the terminal) that's a
+/// silently-hung client and a swallowed error. This turns it into a real 500 response instead.
+fn handle_panic(err: Box<dyn std::any::Any + Send + 'static>) -> axum::response::Response {
+    let details = if let Some(s) = err.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = err.downcast_ref::<&str>() {
+        s.to_string()
+    } else {
+        "internal panic".to_string()
+    };
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        error_page("500", "Something went wrong", &format!("The server hit an internal error: {details}")),
+    ).into_response()
 }
 
 #[tokio::main]
@@ -51,16 +359,35 @@ async fn main() {
         team_tierlist_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
     };
 
+    // Editing writes directly to the JSON data files on disk — fine for local/personal use, but
+    // not something a public deployment (e.g. a GitHub Actions-hosted demo, anyone can hit it)
+    // should expose: a stranger could overwrite or delete real operator/enemy data. Gated behind
+    // `READONLY_MODE` (unset/local runs are unaffected) rather than removed, so the exact same
+    // binary works either way depending on how it's deployed.
+    let editor_routes = Router::new()
+        .route("/editor", get(operator_editor))
+        .route("/enemy_editor", get(enemy_editor_view))
+        .route("/api/operators/save", post(save_operator))
+        .route("/api/operators/{op_id}", delete(delete_operator))
+        .route("/api/enemies/save", post(save_enemy))
+        .route("/api/enemies/{id}", delete(delete_enemy))
+        .route_layer(axum::middleware::from_fn(block_if_readonly));
+
     let app = Router::new()
         .nest_service("/static", ServeDir::new("../static"))
         .route("/", get(read_root))
         .route("/compare", get(comparisons_view))
-        .route("/editor", get(operator_editor))
         .route("/tierlist", get(tierlist_view))
         .route("/teams", get(teams_view))
         .route("/api/team_score", post(get_team_score))
         .route("/api/team_tierlist", get(get_team_tierlist))
         .route("/api/team_tierlist/recalculate", post(recalculate_team_tierlist))
+        .route("/api/team_tierlist/history", get(get_team_tierlist_history))
+        .route("/api/history/{hash}/team_tierlist", get(get_history_team_tierlist))
+        .route("/api/history/{hash}/operators", get(get_history_operator_tierlist))
+        .route("/api/history/{hash}/enemies", get(get_history_enemy_tierlist))
+        .route("/api/history/{hash}/data/operators", get(get_history_data_operators))
+        .route("/api/history/{hash}/data/enemies", get(get_history_data_enemies))
         .route("/enemy_tierlist", get(enemy_tierlist_view))
         .route("/api/enemy_tierlist_data", get(get_enemy_tierlist_data))
         .route("/api/tierlist/export", get(export_tierlist_csv))
@@ -71,12 +398,27 @@ async fn main() {
         .route("/api/tierlist_data", get(get_tierlist_data))
         .route("/api/operators", get(get_operators))
         .route("/api/simulate", post(run_simulation))
-        .route("/api/operators/save", post(save_operator))
-        .route("/api/operators/{op_id}", delete(delete_operator))
-        .route("/enemy_editor", get(enemy_editor_view))
         .route("/api/enemies", get(get_enemies))
-        .route("/api/enemies/save", post(save_enemy))
-        .route("/api/enemies/{id}", delete(delete_enemy))
+        .merge(editor_routes)
+        .fallback(fallback_404)
+        // Layer order (outermost first): catch panics -> convert timeout/other layer errors into
+        // a real response -> enforce the timeout -> cap how many requests run at once -> stamp
+        // security headers -> cap request body size. Bounding concurrency matters most for the
+        // expensive full-roster/genetic-search endpoints — a burst of simultaneous requests (e.g.
+        // several recalculations at once, the exact worry for a small GitHub Actions runner)
+        // queues past this limit instead of all running in parallel and thrashing a machine with
+        // only a couple of CPU cores. The body limit exists because `save_operator`'s photo
+        // upload is otherwise unbounded — a multi-GB "photo" would happily be read fully into
+        // memory before anything rejects it.
+        .layer(
+            tower::ServiceBuilder::new()
+                .layer(CatchPanicLayer::custom(handle_panic))
+                .layer(axum::error_handling::HandleErrorLayer::new(handle_layer_error))
+                .timeout(Duration::from_secs(30))
+                .concurrency_limit(8)
+                .layer(axum::middleware::from_fn(add_security_headers))
+                .layer(axum::extract::DefaultBodyLimit::max(20 * 1024 * 1024)),
+        )
         .with_state(state);
 
     // Allow overriding the port with the PORT environment variable for flexibility.
@@ -1882,28 +2224,111 @@ fn compute_team_tierlist_blocking() -> Vec<Value> {
     core::team::generate_team_tierlist(&profiles)
 }
 
+/// Fires off the operator/enemy Tier List cross-tab + raw-data snapshot for this hash in the
+/// background — expensive (8+4 full-roster passes), so it must never block the response the
+/// caller is waiting on. `ensure_full_history_snapshot` itself no-ops instantly for a hash that's
+/// already fully snapshotted, so this is cheap to call unconditionally on every request.
+fn spawn_history_snapshot(data_hash: String) {
+    tokio::spawn(async move {
+        tokio::task::spawn_blocking(move || ensure_full_history_snapshot(&data_hash)).await.ok();
+    });
+}
+
 async fn get_team_tierlist(State(state): State<AppState>) -> impl IntoResponse {
-    let current_signature = operators_data_signature();
+    let data_hash = operators_data_hash();
+    spawn_history_snapshot(data_hash.clone());
+
+    // 1. In-memory: fastest path, survives nothing but this process's own uptime.
     {
         let cache = state.team_tierlist_cache.read().await;
         if let Some(c) = cache.as_ref() {
-            if c.data_signature == current_signature {
-                return Json(serde_json::json!({ "status": "ready", "teams": c.teams }));
+            if c.data_hash == data_hash {
+                return Json(serde_json::json!({ "status": "ready", "teams": c.teams, "data_hash": data_hash, "source": "memory" }));
             }
-            // The roster changed since this was computed (operator added/edited/removed) — fall
-            // through and regenerate automatically instead of serving a stale list.
         }
     }
+
+    // 2. On disk: survives restarts, and (since it's a real content hash, not mtime/size) would
+    // also hit across a completely different machine given the exact same data — the actual
+    // "skip recomputation if the result ID matches the data ID" behavior.
+    if let Some(teams) = tokio::task::spawn_blocking({
+        let data_hash = data_hash.clone();
+        move || load_team_tierlist_from_disk(&data_hash)
+    }).await.ok().flatten() {
+        *state.team_tierlist_cache.write().await = Some(TeamTierlistCache { teams: teams.clone(), data_hash: data_hash.clone() });
+        return Json(serde_json::json!({ "status": "ready", "teams": teams, "data_hash": data_hash, "source": "disk" }));
+    }
+
+    // 3. Neither hit: this dataset has genuinely never been computed before (or was, before this
+    // caching existed) — run the actual (expensive) genetic search, then persist the result under
+    // its data hash so nothing ever has to redo this exact computation again.
     let teams = tokio::task::spawn_blocking(compute_team_tierlist_blocking).await.unwrap_or_default();
-    *state.team_tierlist_cache.write().await = Some(TeamTierlistCache { teams: teams.clone(), data_signature: current_signature });
-    Json(serde_json::json!({ "status": "ready", "teams": teams }))
+    *state.team_tierlist_cache.write().await = Some(TeamTierlistCache { teams: teams.clone(), data_hash: data_hash.clone() });
+    tokio::task::spawn_blocking({
+        let data_hash = data_hash.clone();
+        let teams = teams.clone();
+        move || save_team_tierlist_to_disk(&data_hash, &teams)
+    }).await.ok();
+    Json(serde_json::json!({ "status": "ready", "teams": teams, "data_hash": data_hash, "source": "computed" }))
 }
 
 async fn recalculate_team_tierlist(State(state): State<AppState>) -> impl IntoResponse {
-    let signature = operators_data_signature();
+    let data_hash = operators_data_hash();
+    spawn_history_snapshot(data_hash.clone());
     let teams = tokio::task::spawn_blocking(compute_team_tierlist_blocking).await.unwrap_or_default();
-    *state.team_tierlist_cache.write().await = Some(TeamTierlistCache { teams: teams.clone(), data_signature: signature });
-    Json(serde_json::json!({ "status": "ready", "teams": teams }))
+    *state.team_tierlist_cache.write().await = Some(TeamTierlistCache { teams: teams.clone(), data_hash: data_hash.clone() });
+    tokio::task::spawn_blocking({
+        let data_hash = data_hash.clone();
+        let teams = teams.clone();
+        move || save_team_tierlist_to_disk(&data_hash, &teams)
+    }).await.ok();
+    Json(serde_json::json!({ "status": "ready", "teams": teams, "data_hash": data_hash, "source": "computed" }))
+}
+
+/// Browse past computations without re-running anything — newest first, capped at 200 entries.
+/// Each entry's `has_*` flags say which of `/api/history/{hash}/...` below actually has data.
+async fn get_team_tierlist_history() -> impl IntoResponse {
+    Json(serde_json::json!({ "history": load_history() }))
+}
+
+/// Fetches one historical entry's cached operator Tier List cross-tab (all 8 categories × 17
+/// ranking metrics — the same shape the "export all categories" CSV uses) straight from disk.
+/// 404s with the block-page style response if this hash was never snapshotted (e.g. still
+/// computing in the background, or an unknown hash).
+async fn get_history_operator_tierlist(Path(data_hash): Path<String>) -> axum::response::Response {
+    match load_json_from_disk(&operator_tierlist_result_path(&data_hash)) {
+        Some(v) => Json(serde_json::json!({ "data_hash": data_hash, "rows": v })).into_response(),
+        None => (StatusCode::NOT_FOUND, error_page("404", "Not found", "No cached operator Tier List for this data hash yet — it may still be computing in the background, or the hash is unknown.")).into_response(),
+    }
+}
+
+async fn get_history_enemy_tierlist(Path(data_hash): Path<String>) -> axum::response::Response {
+    match load_json_from_disk(&enemy_tierlist_result_path(&data_hash)) {
+        Some(v) => Json(serde_json::json!({ "data_hash": data_hash, "rows": v })).into_response(),
+        None => (StatusCode::NOT_FOUND, error_page("404", "Not found", "No cached enemy Tier List for this data hash yet — it may still be computing in the background, or the hash is unknown.")).into_response(),
+    }
+}
+
+async fn get_history_team_tierlist(Path(data_hash): Path<String>) -> axum::response::Response {
+    match load_team_tierlist_from_disk(&data_hash) {
+        Some(v) => Json(serde_json::json!({ "data_hash": data_hash, "teams": v })).into_response(),
+        None => (StatusCode::NOT_FOUND, error_page("404", "Not found", "No cached Team Tier List for this data hash yet.")).into_response(),
+    }
+}
+
+/// The raw operator/enemy data files as they were at the time this hash was first snapshotted —
+/// what makes a history entry fully reproducible even after the live data files move on.
+async fn get_history_data_operators(Path(data_hash): Path<String>) -> axum::response::Response {
+    match load_json_from_disk(&operators_data_snapshot_path(&data_hash)) {
+        Some(v) => Json(v).into_response(),
+        None => (StatusCode::NOT_FOUND, error_page("404", "Not found", "No data snapshot for this hash yet.")).into_response(),
+    }
+}
+async fn get_history_data_enemies(Path(data_hash): Path<String>) -> axum::response::Response {
+    match load_json_from_disk(&enemies_data_snapshot_path(&data_hash)) {
+        Some(v) => Json(v).into_response(),
+        None => (StatusCode::NOT_FOUND, error_page("404", "Not found", "No data snapshot for this hash yet.")).into_response(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -1989,6 +2414,26 @@ async fn run_simulation(Json(payload): Json<SimulateRequest>) -> impl IntoRespon
     Json(res)
 }
 
+/// The uploaded photo's filename came straight from the multipart request's `Content-Disposition`
+/// header with zero validation — an attacker could set it to e.g. `../js/main.js` or
+/// `../../rust_engine/src/main.rs` and `save_operator` would write the upload wherever that path
+/// traversal landed (arbitrary file write, gated only by the process's own filesystem
+/// permissions — persistent site-wide XSS via overwriting a real static asset, at minimum).
+/// This takes only the final path component (defeats `../`/absolute paths/embedded separators of
+/// either flavor) and requires a plain `name.ext` shape with a real image extension.
+fn sanitize_upload_filename(raw: &str) -> Option<String> {
+    let base = std::path::Path::new(raw).file_name()?.to_str()?;
+    let ext = std::path::Path::new(base).extension()?.to_str()?.to_ascii_lowercase();
+    if !["png", "jpg", "jpeg", "webp", "gif"].contains(&ext.as_str()) {
+        return None;
+    }
+    let stem = std::path::Path::new(base).file_stem()?.to_str()?;
+    if stem.is_empty() || !stem.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.') {
+        return None;
+    }
+    Some(format!("{}.{}", stem, ext))
+}
+
 async fn save_operator(mut multipart: axum::extract::Multipart) -> impl IntoResponse {
     let mut op_data: Option<Value> = None;
     let mut photo_bytes: Option<axum::body::Bytes> = None;
@@ -2013,11 +2458,11 @@ async fn save_operator(mut multipart: axum::extract::Multipart) -> impl IntoResp
 
     if let Some(mut data) = op_data {
         if let Some(filename) = photo_filename {
-            if let Some(bytes) = photo_bytes {
-                let path = format!("../static/images/{}", filename);
+            if let (Some(bytes), Some(safe_name)) = (photo_bytes, sanitize_upload_filename(&filename)) {
+                let path = format!("../static/images/{}", safe_name);
                 let _ = std::fs::write(&path, bytes);
                 if let Some(obj) = data.as_object_mut() {
-                    obj.insert("photo_path".to_string(), serde_json::json!(filename));
+                    obj.insert("photo_path".to_string(), serde_json::json!(safe_name));
                 }
             }
         }
@@ -2087,28 +2532,12 @@ fn compute_enemy_tierlist(category_in: &str) -> (Vec<Value>, String) {
         });
     }
 
-    // Some entries carry a NORMAL/ELITE/BOSS tier label copied from the game's own UI category,
-    // but their stats actually belong to a special-mode encounter (CC hazard buffs, IS/RA
-    // event-only enemies, etc.) rather than a real standard-campaign threat of that class
-    // (e.g. `enemy_2093_skzams` is tagged NORMAL with ~500K HP). Drop those from the tier list
-    // itself, not just the operator-scoring baseline, so they don't misrepresent that tier.
-    enemies.retain(|e| {
-        let t = e.get("tier_type").or_else(|| e.get("tier")).and_then(|v| v.as_str()).unwrap_or("").to_uppercase();
-        let (hp_lo, hp_hi, def_lo, def_hi, res_lo, res_hi, atk_lo, atk_hi) = match t.as_str() {
-            "NORMAL" => (1_000.0, 15_000.0, 100.0, 1_000.0, 10.0, 30.0, 100.0, 1_000.0),
-            "ELITE" => (5_000.0, 30_000.0, 500.0, 2_500.0, 30.0, 60.0, 500.0, 2_000.0),
-            "BOSS" => (15_000.0, 200_000.0, 1_000.0, 4_500.0, 45.0, 90.0, 2_000.0, 4_000.0),
-            _ => return true,
-        };
-        let hp = e.get("hp").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let def = e.get("def").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let res = e.get("res").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let atk = e.get("atk").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        // ATK floor only applies when ATK is actually reported: many bosses/elites legitimately
-        // deal 0 basic-attack damage (skill/aura-only kits), which this floor isn't meant to catch.
-        let atk_below_floor = atk > 0.0 && atk < atk_lo;
-        !(hp < hp_lo || hp > hp_hi || def < def_lo || def > def_hi || res < res_lo || res > res_hi || atk_below_floor || atk > atk_hi)
-    });
+    // NOTE: the NORMAL/ELITE/BOSS stat floor/cap range (see `core::enemy::is_outlier_for_tier`)
+    // deliberately does NOT apply here. That range exists to pick which enemies represent a
+    // "standard-campaign" NORMAL/ELITE/BOSS threat for the *operator* Tier List's scoring
+    // baseline — it was never meant to hide enemies from the Enemy Tier List page itself, which
+    // should keep showing the full roster (including CC/IS/RA specials) regardless of that range.
+    // An earlier pass wrongly applied the same filter here too, dropping ~1600 of ~2000 entries.
 
     let mut enriched = Vec::new();
     for e in enemies {

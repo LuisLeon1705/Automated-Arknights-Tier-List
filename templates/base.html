@@ -4,24 +4,42 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Arknights Analytical Engine{% endblock %}</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=3">
+    <link rel="stylesheet" href="/static/css/style.css?v=14">
     {% block head %}{% endblock %}
 </head>
 <body>
     <header>
         <div class="logo">
-            <h1>ARKNIGHTS <span class="text-accent">ANALYTICS</span> <span style="font-size: 0.55em; background: rgba(56, 189, 248, 0.2); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); border-radius: 4px; padding: 2px 6px; vertical-align: middle; margin-left: 8px;">v1.1.1</span></h1>
+            <h1>ARKNIGHTS <span class="text-accent">ANALYTICS</span> <span style="font-size: 0.55em; background: rgba(56, 189, 248, 0.2); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); border-radius: 4px; padding: 2px 6px; vertical-align: middle; margin-left: 8px;">v1.3.2</span></h1>
         </div>
-        <nav>
-            <a href="/">DASHBOARD</a>
-            <a href="/tierlist">TIER LIST</a>
-            <a href="/teams">TEAMS</a>
-            <a href="/enemy_tierlist">ENEMY TIER LIST</a>
-            <a href="/compare">COMPARISONS</a>
-            <a href="/editor">OPERATOR EDITOR</a>
-            <a href="/enemy_editor">ENEMY EDITOR</a>
+        <button id="nav-toggle" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+        <nav id="main-nav">
+            <a href="/"><span class="nav-icon">&#127968;</span>DASHBOARD</a>
+            <a href="/tierlist"><span class="nav-icon">&#128202;</span>TIER LIST</a>
+            <a href="/teams"><span class="nav-icon">&#128101;</span>TEAMS</a>
+            <a href="/enemy_tierlist"><span class="nav-icon">&#128128;</span>ENEMY TIER LIST</a>
+            <a href="/compare"><span class="nav-icon">&#9878;&#65039;</span>COMPARISONS</a>
+            <a href="/editor"><span class="nav-icon">&#9999;&#65039;</span>OPERATOR EDITOR</a>
+            <a href="/enemy_editor"><span class="nav-icon">&#128296;</span>ENEMY EDITOR</a>
         </nav>
     </header>
+    <script>
+        // Mobile nav dropdown: a horizontal-wrap nav (the previous mobile approach) still eats a
+        // lot of vertical space and reads as a wall of text on a phone. Below the CSS breakpoint
+        // this becomes a real collapsed list instead, toggled by the hamburger button.
+        (function () {
+            const btn = document.getElementById('nav-toggle');
+            const nav = document.getElementById('main-nav');
+            btn.addEventListener('click', () => {
+                const open = nav.classList.toggle('open');
+                btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+            });
+            nav.querySelectorAll('a').forEach(a => a.addEventListener('click', () => {
+                nav.classList.remove('open');
+                btn.setAttribute('aria-expanded', 'false');
+            }));
+        })();
+    </script>
 
     <div class="container">
         {% block content %}{% endblock %}

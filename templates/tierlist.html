@@ -36,6 +36,59 @@
     transform: translateY(-2px);
     border-color: var(--accent-primary);
 }
+
+/* Compact mode: a long tier list of fully-detailed cards (photo + subclass + skill/module tags +
+   score pill + a 6-stat grid) is a LOT of vertical scrolling and small touch targets on a phone.
+   Compact mode strips each card down to just the portrait + name (still enough to recognize and
+   tap into), toggled by `#toggle-compact-view` below — defaults to on for narrow viewports on
+   first load (see the script at the bottom of this file), remembered via localStorage after that. */
+/* A real CSS grid, not relying on flex-wrap sizing a fixed-width card — guarantees several
+   columns per row regardless of any width-specificity quirks between this and the desktop
+   `.op-mini-card { width: 230px }` rule above. The tier-label bar is also shrunk here: at full
+   80px width it was eating close to a third of a phone's usable row width on top of the cards
+   themselves. */
+#tierlist-container.compact-view .tier-content {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
+    gap: 6px;
+}
+/* Rotated/sideways text (an earlier version of this) is hard to read at a glance — a short
+   horizontal bar ABOVE the row reads instantly instead, at the cost of stacking rows vertically
+   rather than side-by-side (a non-issue since the row below is already a wrapping grid). */
+#tierlist-container.compact-view .tier-row {
+    flex-direction: column;
+}
+#tierlist-container.compact-view .tier-label {
+    width: 100%;
+    height: 28px;
+    font-size: 1.1rem;
+}
+#tierlist-container.compact-view .op-mini-card {
+    width: auto;
+    padding: 6px;
+    align-items: center;
+}
+#tierlist-container.compact-view .op-portrait {
+    width: 56px;
+    height: 56px;
+}
+#tierlist-container.compact-view .op-title-block { padding-right: 0; }
+#tierlist-container.compact-view .op-subclass,
+#tierlist-container.compact-view .config-tags-row,
+#tierlist-container.compact-view .op-score-pill,
+#tierlist-container.compact-view .op-stat-grid {
+    display: none;
+}
+#tierlist-container.compact-view .op-name {
+    font-size: 0.7rem;
+    text-align: center;
+    white-space: normal;
+    line-height: 1.15;
+}
+#tierlist-container.compact-view .op-header-row {
+    flex-direction: column;
+    gap: 4px;
+}
 .op-rarity-badge {
     position: absolute;
     top: 6px;
@@ -158,6 +211,29 @@
     padding: 6px;
     border-radius: 4px;
 }
+
+.chart-grid-panel {
+    flex: 3;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 20px;
+    min-width: 0;
+}
+@media (max-width: 900px) {
+    /* `minmax(0, 1fr)`, not a bare `1fr` — a plain `1fr` track still refuses to shrink a grid
+       item below its content's min-content size, so a wide Chart.js canvas kept forcing this
+       "single column" override back out to its original width and overflowing the whole
+       Statistical Curves section sideways off the sidebar next to it. */
+    .chart-grid-panel { grid-template-columns: minmax(0, 1fr); }
+    /* The checklist sidebar's own `max-width:250px` (inline style) stops it from ever using the
+       full row once it wraps below the chart grid — let it use the whole width on a phone. */
+    #analytics-section > div > div:first-child { max-width: none !important; }
+}
+@media (max-width: 640px) {
+    /* Both panels technically FIT side by side once shrunk (~150px each), but that's too cramped
+       to actually read — force a clean top-to-bottom stack instead on a phone. */
+    #analytics-section > div:first-of-type { flex-direction: column; }
+}
 .op-stat-item {
     display: flex;
     justify-content: space-between;
@@ -224,6 +300,8 @@
             <input type="checkbox" id="best-result-only" checked>
             <label for="best-result-only">Best Config Only</label>
         </div>
+
+        <button id="toggle-compact-view" class="secondary" style="padding:6px 12px; font-size:0.8em;">COMPACT VIEW</button>
     </div>
 
     <div id="filter-panel" style="display:none; margin-bottom: 1.5rem; background: rgba(0,0,0,0.25); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px;">
@@ -285,7 +363,7 @@
                 <!-- Checkboxes populated dynamically -->
             </div>
         </div>
-        <div style="flex: 3; display: grid; grid-template-columns: 1fr 1fr; gap: 20px; min-width: 600px;">
+        <div class="chart-grid-panel">
             <div style="background: rgba(0,0,0,0.2); padding: 10px; border-radius: 8px;"><canvas id="chart-total-dmg"></canvas></div>
             <div style="background: rgba(0,0,0,0.2); padding: 10px; border-radius: 8px;"><canvas id="chart-total-skill-dmg"></canvas></div>
             <div style="background: rgba(0,0,0,0.2); padding: 10px; border-radius: 8px;"><canvas id="chart-phys-dmg"></canvas></div>
@@ -524,6 +602,27 @@ let currentView = 'general';
     document.getElementById('tierlist-search').addEventListener('input', () => {
         renderView();
     });
+
+    // Compact view: CSS-only toggle (no re-render needed), defaults ON for phone-width screens
+    // on first-ever visit, remembered via localStorage after that so the choice sticks across
+    // page loads/filters instead of resetting every time.
+    (function initCompactView() {
+        const container = document.getElementById('tierlist-container');
+        const btn = document.getElementById('toggle-compact-view');
+        const stored = localStorage.getItem('tierlist-compact-view');
+        const compact = stored !== null ? stored === '1' : window.innerWidth <= 640;
+        function apply(isCompact) {
+            container.classList.toggle('compact-view', isCompact);
+            btn.innerText = isCompact ? 'DETAILED VIEW' : 'COMPACT VIEW';
+            btn.classList.toggle('primary', isCompact);
+        }
+        apply(compact);
+        btn.addEventListener('click', () => {
+            const next = !container.classList.contains('compact-view');
+            apply(next);
+            localStorage.setItem('tierlist-compact-view', next ? '1' : '0');
+        });
+    })();
     
     document.getElementById('tierlist-mode').addEventListener('change', (e) => {
         currentMode = e.target.value;

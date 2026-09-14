@@ -22,8 +22,10 @@ header {
     border-bottom: 2px solid var(--accent);
     padding: 1rem 2rem;
     display: flex;
+    flex-wrap: wrap;
     justify-content: space-between;
     align-items: center;
+    gap: 0.75rem;
 }
 
 h1, h2, h3 {
@@ -32,11 +34,35 @@ h1, h2, h3 {
     letter-spacing: 1px;
 }
 
+nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 18px;
+}
+
 nav a {
     color: var(--text-primary);
     text-decoration: none;
-    margin-left: 20px;
+    margin-left: 0;
     font-size: 0.9rem;
+    white-space: nowrap;
+}
+
+.nav-icon {
+    margin-right: 5px;
+}
+
+/* Hamburger toggle: hidden by default (desktop shows the plain horizontal `nav` list), shown
+   only under the mobile breakpoint below where it takes over collapsing/expanding `nav`. */
+#nav-toggle {
+    display: none;
+    background: none;
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    font-size: 1.3rem;
+    line-height: 1;
+    padding: 4px 10px;
+    cursor: pointer;
 }
 
 nav a:hover {
@@ -47,6 +73,96 @@ nav a:hover {
     padding: 2rem;
     max-width: 1400px;
     margin: 0 auto;
+    box-sizing: border-box;
+}
+
+/* Every layout in this file assumes border-box everywhere it isn't explicitly overridden — the
+   single biggest cause of horizontal scroll/overflow on narrow viewports is a fixed-width or
+   100%-width element that ALSO has its own padding/border added on top (content-box default). */
+*, *::before, *::after {
+    box-sizing: border-box;
+}
+
+/* ---------------------------------------------------------------------------------------------
+   Responsive breakpoints. Two tiers: tablet (<=1024px, roughly iPad-and-smaller-laptop territory)
+   and mobile (<=640px). Mobile-first isn't practical to retrofit onto an existing desktop-first
+   stylesheet without a full rewrite, so this instead narrows/stacks/shrinks the desktop layout
+   at each breakpoint — same approach the per-page <style> blocks below follow too.
+   --------------------------------------------------------------------------------------------- */
+@media (max-width: 1024px) {
+    .container { padding: 1.25rem; }
+    header { padding: 0.85rem 1.25rem; }
+    /* `minmax(0, 1fr)`, not a bare `1fr` — a plain `1fr` track still refuses to shrink a grid
+       item below its content's min-content size (the same default-min-width:auto behavior flex
+       items have), so a wide table or long text inside would keep forcing the "single column"
+       layout back out to its original multi-hundred-px width regardless of this override. */
+    .dashboard-grid { grid-template-columns: minmax(0, 1fr) !important; }
+    .graphs-grid { grid-template-columns: minmax(0, 1fr) !important; }
+
+    /* Tables regularly have 8-17 columns in this app (the Tier List's rank-by-metric columns,
+       stat comparison tables) — no amount of column shrinking makes that fit a tablet/phone
+       screen, so the table scrolls within its own box instead of forcing the whole page to
+       scroll sideways. */
+    table { display: block; overflow-x: auto; white-space: nowrap; }
+
+    /* A lot of this app's secondary layout (toolbars, editor form field rows, comparison panels)
+       is one-off `style="display:grid/flex; ..."` on individual elements rather than a shared
+       class, since each was written for its own form. Retrofitting every one of those
+       individually isn't practical, so this collapses ANY inline grid to a single column and
+       wraps any inline flex row as a blanket safety net that kicks in from tablet width down —
+       an element that specifically needs to stay multi-column/row even here (the few handled
+       above) uses a real class instead, which these attribute selectors don't match, so those
+       are unaffected. `!important` is required because inline styles otherwise always win over
+       an external stylesheet regardless of specificity. */
+    [style*="grid-template-columns"] { grid-template-columns: minmax(0, 1fr) !important; }
+    [style*="min-width"] { min-width: 0 !important; }
+    /* Same reasoning as the grid rule above, for inline flex rows (a LOT of this app's toolbars
+       and label+control pairs are one-off `style="display:flex; gap:...px"`): a row that doesn't
+       wrap forces every child to its natural content width regardless of viewport, and a single
+       unwrapped child (e.g. a `<select>` with a long option) can still blow past the viewport
+       even when the row it's nested in DOES wrap, because that child renders at shrink-to-fit
+       width on its own line rather than being width-constrained by anything above it. Forcing
+       wrap at every level breaks that chain. */
+    [style*="display: flex"], [style*="display:flex"] { flex-wrap: wrap; min-width: 0; }
+    input[type="text"], input:not([type]) { min-width: 140px; flex-grow: 1; }
+    /* `.tabs` (Operator/Enemy Editor's General/Combat/Skills/Modules/... row) is a CLASS-based
+       flex row, not an inline style, so the blanket `[style*="display:flex"]` rule above doesn't
+       reach it — a real tab bar with 5+ tabs is exactly the kind of row that needs to wrap on a
+       phone instead of running off the right edge. */
+    .tabs { flex-wrap: wrap; }
+}
+
+@media (max-width: 640px) {
+    .container { padding: 0.85rem; }
+    header { padding: 0.75rem 1rem; }
+    h1 { font-size: 1.15rem; }
+    button { padding: 8px 14px; font-size: 0.82rem; }
+    .card { padding: 1rem; }
+
+    /* Below this width the nav becomes a real collapsed list instead of a horizontal wrap —
+       7 links wrapped across 2-3 lines under the logo ate a lot of vertical space and read as a
+       wall of text before you even reached page content. Collapsed by default; `#nav-toggle`
+       (hidden on desktop) opens it as a full-width vertical dropdown. */
+    #nav-toggle { display: block; }
+    nav {
+        display: none;
+        flex-direction: column;
+        gap: 0;
+        position: absolute;
+        top: 100%;
+        left: 0;
+        right: 0;
+        background: var(--bg-secondary);
+        border-bottom: 2px solid var(--accent);
+        z-index: 50;
+    }
+    nav.open { display: flex; }
+    nav a {
+        padding: 12px 16px;
+        border-top: 1px solid var(--border-color);
+        font-size: 0.85rem;
+    }
+    header { position: relative; }
 }
 
 /* Relaxed Edges */
@@ -81,6 +197,13 @@ input, select, textarea {
     border: 1px solid var(--border-color);
     padding: 8px 12px;
     font-size: 1rem;
+    /* A <select> with a long option (e.g. "General (Composite Dataset)") sizes itself to that
+       text's intrinsic width by default — and a flex item's default `min-width: auto` refuses to
+       shrink it below that, blowing well past a phone's viewport no matter how much flex-wrap the
+       parent has. min-width:0 lets it actually shrink; max-width:100% stops it exceeding its
+       container on any screen size, not just narrow ones. */
+    min-width: 0;
+    max-width: 100%;
 }
 
 input:focus, select:focus {
@@ -145,6 +268,13 @@ svg.chart {
     width: 100%;
     height: 400px;
 }
+
+/* Chart.js canvases set their own width/height attributes in JS at creation time based on
+   their container's width at that moment — if that ever happens before a responsive layout
+   settles (or the container simply reports a stale/larger width), the canvas keeps rendering at
+   that fixed pixel size regardless of viewport, forcing horizontal overflow. CSS max-width
+   constrains the DISPLAY size regardless of the canvas's internal backing resolution. */
+canvas { max-width: 100%; }
 
 polyline {
     stroke-dasharray: 2000;
@@ -518,7 +648,8 @@ polyline {
     align-items: center;
     font-weight: bold;
     font-size: 1.5rem;
-    color: #000;
+    /* Per-tier text color is set by each .tier-X rule below (a fixed black default here would be
+       unreadable against the darker end of the scale) — this is just the shared box layout. */
 }
 
 .tier-content {
@@ -550,15 +681,23 @@ polyline {
     text-overflow: ellipsis;
 }
 
-/* Tier Colors */
-.tier-OP { background-color: #ff3e3e; }
-.tier-S  { background-color: #ff7e3e; }
-.tier-A  { background-color: #ffbe3e; }
-.tier-B  { background-color: #ffff3e; }
-.tier-C  { background-color: #beff3e; }
-.tier-D  { background-color: #7eff3e; }
-.tier-E  { background-color: #3eff3e; }
-.tier-F  { background-color: #3effbe; }
+/* Tier Colors — a Viridis-derived ramp (the perceptually-uniform, colorblind-safe palette
+   matplotlib/most scientific plotting defaults to for exactly this reason) instead of the old
+   straight red-orange-yellow-green-cyan hue rotation, which collapses into a near-indistinguishable
+   smear for red-green colorblind users (deuteranopia/protanopia — the most common forms) right
+   across the A/B/C/D range where most operators actually land. Varies in BOTH hue and lightness
+   (bright yellow-green at the top, dark blue-purple at the bottom) so tier is still readable by
+   lightness alone even if hue can't be distinguished at all (the tritanopia/monochromacy case).
+   Each rule also sets its own text `color` for contrast — the old fixed black `.tier-label` text
+   would be unreadable against the dark purple bottom tiers. */
+.tier-OP { background-color: #fde725; color: #1a1a1a; }
+.tier-S  { background-color: #a0da39; color: #1a1a1a; }
+.tier-A  { background-color: #4ac16d; color: #0a0a0a; }
+.tier-B  { background-color: #1fa187; color: #f5f5f5; }
+.tier-C  { background-color: #277f8e; color: #f5f5f5; }
+.tier-D  { background-color: #365c8d; color: #f5f5f5; }
+.tier-E  { background-color: #46327e; color: #f5f5f5; }
+.tier-F  { background-color: #440154; color: #f5f5f5; }
 
 /* Delete Buttons */
 .delete-btn {

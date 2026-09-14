@@ -14,7 +14,23 @@
 .tab-btn.active:hover { border-bottom-color: var(--accent-primary); }
 
 .team-builder-layout { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr); gap: 1.5rem; align-items: start; }
-@media (max-width: 980px) { .team-builder-layout { grid-template-columns: 1fr; } }
+@media (max-width: 980px) {
+    .team-builder-layout { grid-template-columns: 1fr; }
+    /* On mobile the two columns stack, and DOM order (picker first, team second) would put the
+       whole operator-search grid ABOVE your actual team/radar/score — meaning scrolling past
+       potentially 400+ operator tiles just to see the team you're building. Swap the visual
+       order so the team (what you're actually here to look at and touch) comes first; the picker
+       you scroll to when you specifically want to add someone. */
+    .picker-col { order: 2; }
+    .team-col { order: 1; }
+}
+@media (max-width: 520px) {
+    /* 4 fixed columns is fine down to tablet width, but on a phone it squeezes each of the 12
+       team slots (portrait + name + lock icon) into ~70px — 2 columns keeps them usable. */
+    .team-slots { grid-template-columns: repeat(2, 1fr); }
+    .tl-portraits { grid-template-columns: repeat(2, 1fr); }
+    .axis-breakdown { grid-template-columns: 1fr; }
+}
 
 .picker-toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 .picker-toolbar input { flex: 1; min-width: 160px; }
@@ -226,7 +242,10 @@
     }
 
     let teamTierlistData = null;
-    const TEAM_TIER_COLOR = { OP: '#ef4444', S: '#f59e0b', A: '#eab308', B: '#22c55e', C: '#3b82f6', D: '#94a3b8', E: '#64748b', F: '#475569' };
+    // Viridis-derived, colorblind-safe (varies in lightness as well as hue, unlike a straight
+    // red-yellow-green hue rotation which collapses for red-green colorblind users) — matches
+    // static/css/style.css's .tier-OP..F palette.
+    const TEAM_TIER_COLOR = { OP: '#fde725', S: '#a0da39', A: '#4ac16d', B: '#1fa187', C: '#277f8e', D: '#365c8d', E: '#46327e', F: '#440154' };
 
     async function fetchTeamTierlist(forceRecalculate) {
         const hint = document.getElementById('tierlist-hint');
@@ -708,7 +727,7 @@
             const score = Math.round(data.axes[key] || 0);
             const gr = data.grades[key] || '-';
             const contrib = (data.contributors[key] || []).join(', ') || '&mdash;';
-            const color = { OP: '#ef4444', S: '#f59e0b', A: '#eab308', B: '#22c55e', C: '#3b82f6', D: '#94a3b8', E: '#64748b' }[gr] || '#94a3b8';
+            const color = TEAM_TIER_COLOR[gr] || '#94a3b8';
             return `
                 <div class="axis-card">
                     <div class="axis-top">

@@ -190,7 +190,11 @@
 <script>
     const VERSION = "{{ version }}";
     const participants = [];
-    const colors = ['#ff3e3e', '#2196F3', '#4CAF50', '#FFEB3B', '#E91E63', '#9C27B0'];
+    // Okabe-Ito palette — designed specifically so each color stays distinguishable from every
+    // other under all common forms of color blindness (the old red/blue/green/yellow/pink/purple
+    // mix could put a red and green line side by side, which is exactly the pairing deuteranopia/
+    // protanopia can't tell apart).
+    const colors = ['#E69F00', '#56B4E9', '#009E73', '#F0E442', '#0072B2', '#D55E00'];
 
     // Custom Select Logic
     const selectHeader = document.getElementById('select-header');
