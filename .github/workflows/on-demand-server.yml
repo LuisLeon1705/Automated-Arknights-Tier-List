@@ -32,9 +32,18 @@ jobs:
         # Tokens (classic), no special scopes needed for reading your OWN billing) added under
         # Settings -> Secrets and variables -> Actions -> New repository secret. Skips cleanly
         # (rather than failing the whole run) if that secret was never added.
-        if: ${{ secrets.BILLING_PAT != '' }}
+        #
+        # NOTE: the `secrets` context can't be referenced directly in a step's `if:` — GitHub's
+        # workflow validator rejects it outright ("Unrecognized named-value: 'secrets'"). Passing
+        # it through `env:` instead (always allowed) and branching in bash sidesteps that.
+        env:
+          BILLING_PAT: ${{ secrets.BILLING_PAT }}
         run: |
-          RESP=$(curl -s -H "Authorization: Bearer ${{ secrets.BILLING_PAT }}" -H "Accept: application/vnd.github+json" "https://api.github.com/users/${{ github.repository_owner }}/settings/billing/actions")
+          if [ -z "$BILLING_PAT" ]; then
+            echo "Add a 'BILLING_PAT' repo secret to see remaining Actions minutes here on every run. See README."
+            exit 0
+          fi
+          RESP=$(curl -s -H "Authorization: Bearer $BILLING_PAT" -H "Accept: application/vnd.github+json" "https://api.github.com/users/${{ github.repository_owner }}/settings/billing/actions")
           USED=$(echo "$RESP" | jq -r '.total_minutes_used // empty')
           INCLUDED=$(echo "$RESP" | jq -r '.included_minutes // empty')
           echo "############################################################"
@@ -46,10 +55,6 @@ jobs:
             echo "#  Response: $RESP"
           fi
           echo "############################################################"
-
-      - name: (No BILLING_PAT secret set — skipping the minutes counter)
-        if: ${{ secrets.BILLING_PAT == '' }}
-        run: echo "Add a 'BILLING_PAT' repo secret to see remaining Actions minutes here on every run. See README."
 
       - name: Install Rust
         run: |

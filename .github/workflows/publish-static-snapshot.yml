@@ -1,0 +1,116 @@
+name: Publish Static Snapshot
+
+# This is the "no functionality" page from the README — a read-only, always-available GitHub
+# Pages site built from the SAME cached history data `on-demand-server.yml` (and the app's own
+# `/api/team_tierlist` request) produce, but with no live server behind it: no Team Builder POST,
+# no editing, just browsing the current operator/enemy Tier Lists. It rebuilds whenever the
+# roster data changes, or on demand.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "data/Automated_Operators.json"
+      - "data/Automated_Enemies.json"
+      - "static_site/**"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cache cargo/target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust_engine/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust_engine/Cargo.lock') }}
+
+      - name: Build (release)
+        working-directory: rust_engine
+        run: cargo build --release --bin rust_engine
+
+      - name: Start server and trigger the full history snapshot
+        working-directory: rust_engine
+        env:
+          READONLY_MODE: "1"
+          PORT: "8000"
+        run: |
+          ./target/release/rust_engine &
+          echo $! > /tmp/server.pid
+          for i in $(seq 1 30); do
+            curl -s -o /dev/null http://127.0.0.1:8000/ && break
+            sleep 1
+          done
+          # Hitting this endpoint is what kicks off the (background) operator/enemy Tier List
+          # cross-tab computation for the current data hash — see main.rs's `spawn_history_snapshot`.
+          DATA_HASH=$(curl -s http://127.0.0.1:8000/api/team_tierlist | python3 -c "import json,sys; print(json.load(sys.stdin)['data_hash'])")
+          echo "DATA_HASH=$DATA_HASH" >> "$GITHUB_ENV"
+          echo "Data hash: $DATA_HASH — waiting for the background snapshot to finish..."
+          for i in $(seq 1 180); do
+            if [ -f "../data/cache/$DATA_HASH/operator_tierlist.json" ] && [ -f "../data/cache/$DATA_HASH/enemy_tierlist.json" ]; then
+              echo "Snapshot ready after ~${i}s."
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/server.pid)" 2>/dev/null || true
+
+      - name: Assemble the static site
+        run: |
+          mkdir -p public/images
+          cp static_site/index.html public/index.html
+          cp "data/cache/$DATA_HASH/operator_tierlist.json" public/operator_tierlist.json
+          cp "data/cache/$DATA_HASH/enemy_tierlist.json" public/enemy_tierlist.json
+          # Only the portraits the snapshot actually references get copied — the full
+          # static/images/ folder (operators + every enemy) is ~90MB, most of it irrelevant to
+          # any single build, and Pages has its own size ceiling worth not eating into for nothing.
+          python3 - <<'PY'
+          import json, shutil, os
+          for src_name, dst_sub, key in [("operator_tierlist.json", "", "photo_path"), ("enemy_tierlist.json", "enemies", "id")]:
+              with open(f"public/{src_name}", encoding="utf-8") as f:
+                  rows = json.load(f)
+              names = set()
+              for r in rows:
+                  v = r.get(key)
+                  if v:
+                      names.add(f"{v}.png" if key == "id" else v)
+              for name in names:
+                  src = os.path.join("static/images", dst_sub, name) if dst_sub else os.path.join("static/images", name)
+                  dst = os.path.join("public/images", dst_sub, name) if dst_sub else os.path.join("public/images", name)
+                  os.makedirs(os.path.dirname(dst), exist_ok=True)
+                  if os.path.exists(src):
+                      shutil.copyfile(src, dst)
+          PY
+          python3 -c "import json,time; json.dump({'computed_at': int(time.time()), 'data_hash': '$DATA_HASH'}, open('public/snapshot_meta.json','w'))"
+          du -sh public
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Arknights Analytics — Static Snapshot</title>
+<style>
+:root {
+    --bg-main: #0a0a0a; --bg-secondary: #161616; --bg-card: #1c1c1c;
+    --text-primary: #e0e0e0; --text-secondary: #aaaaaa; --accent: #ff3e3e; --border-color: #333333;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg-main); color: var(--text-primary); font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; }
+header { background: var(--bg-secondary); border-bottom: 2px solid var(--accent); padding: 1rem 2rem; }
+h1 { margin: 0; font-weight: 300; letter-spacing: 1px; font-size: 1.3rem; }
+.text-accent { color: var(--accent); }
+.badge { font-size: 0.55em; background: rgba(56,189,248,0.2); color: #38bdf8; border: 1px solid rgba(56,189,248,0.4); border-radius: 4px; padding: 2px 6px; vertical-align: middle; margin-left: 8px; }
+.banner { background: rgba(255,62,62,0.12); border: 1px solid rgba(255,62,62,0.4); border-radius: 8px; padding: 12px 16px; margin: 1rem 2rem; font-size: 0.88rem; color: var(--text-secondary); }
+.banner strong { color: #fff; }
+.banner a { color: #38bdf8; }
+.container { padding: 1.5rem 2rem; max-width: 1400px; margin: 0 auto; }
+.toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 1.5rem; }
+select, input {
+    background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border-color);
+    padding: 8px 12px; font-size: 0.9rem; border-radius: 6px; min-width: 0;
+}
+input { flex: 1; min-width: 160px; }
+.tabs { display: flex; gap: 4px; margin-bottom: 1rem; flex-wrap: wrap; }
+.tab-btn {
+    background: var(--bg-card); color: var(--text-secondary); border: 1px solid var(--border-color);
+    padding: 8px 16px; cursor: pointer; border-radius: 6px; font-weight: 600; font-size: 0.85rem;
+}
+.tab-btn.active { color: #fff; border-color: var(--accent); }
+.tier-row { display: flex; flex-direction: column; margin-bottom: 12px; border: 1px solid var(--border-color); border-radius: 6px; overflow: hidden; }
+.tier-label { width: 100%; height: 28px; display: flex; align-items: center; justify-content: center; font-weight: 900; font-size: 1.1rem; }
+.tier-OP { background: #fde725; color: #1a1a1a; } .tier-S { background: #a0da39; color: #1a1a1a; }
+.tier-A { background: #4ac16d; color: #0a0a0a; } .tier-B { background: #1fa187; color: #f5f5f5; }
+.tier-C { background: #277f8e; color: #f5f5f5; } .tier-D { background: #365c8d; color: #f5f5f5; }
+.tier-E { background: #46327e; color: #f5f5f5; } .tier-F { background: #440154; color: #f5f5f5; }
+.tier-content { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; padding: 10px; background: var(--bg-card); }
+.card { background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 6px; padding: 8px; text-align: center; position: relative; }
+.card img { width: 56px; height: 56px; border-radius: 6px; object-fit: cover; background: #000; margin-bottom: 4px; }
+.card .name { font-weight: 700; font-size: 0.8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .sub { font-size: 0.68rem; color: var(--text-secondary); margin-top: 2px; }
+.card .rarity { position: absolute; top: 4px; right: 4px; font-size: 0.6rem; font-weight: 800; padding: 1px 5px; border-radius: 3px; background: rgba(245,158,11,0.25); color: #fbbf24; border: 1px solid #f59e0b; }
+.hint { color: var(--text-secondary); font-size: 0.85rem; text-align: center; padding: 2rem; }
+</style>
+</head>
+<body>
+<header>
+    <h1>ARKNIGHTS <span class="text-accent">ANALYTICS</span><span class="badge">STATIC SNAPSHOT</span></h1>
+</header>
+<div class="banner">
+    <strong>This is a read-only snapshot</strong>, computed at build time (<span id="snapshot-time">—</span>) — no live recalculation, no Team Builder, no editing.
+    For the live interactive app (build a team, get swap recommendations, edit data), trigger the
+    <strong>On-Demand Server</strong> workflow from the repo's Actions tab and use the URL it prints.
+</div>
+<div class="container">
+    <div class="tabs">
+        <button class="tab-btn active" data-tab="operators">OPERATOR TIER LIST</button>
+        <button class="tab-btn" data-tab="enemies">ENEMY TIER LIST</button>
+    </div>
+
+    <div id="tab-operators">
+        <div class="toolbar">
+            <select id="op-category"></select>
+            <input id="op-search" type="text" placeholder="Search operator...">
+        </div>
+        <div id="op-results"></div>
+    </div>
+
+    <div id="tab-enemies" style="display:none;">
+        <div class="toolbar">
+            <select id="enemy-category"></select>
+            <input id="enemy-search" type="text" placeholder="Search enemy...">
+        </div>
+        <div id="enemy-results"></div>
+    </div>
+</div>
+
+<script>
+const TIER_ORDER = ['OP', 'S', 'A', 'B', 'C', 'D', 'E', 'F'];
+const CLASS_LABEL = { PIONEER: 'Vanguard', WARRIOR: 'Guard', TANK: 'Defender', SNIPER: 'Sniper', CASTER: 'Caster', MEDIC: 'Medic', SUPPORT: 'Supporter', SPECIAL: 'Specialist' };
+
+let opRows = [], enemyRows = [];
+
+function renderTierGroups(container, rows, nameKey, subLine, imgSrc) {
+    if (rows.length === 0) {
+        container.innerHTML = '<div class="hint">No results.</div>';
+        return;
+    }
+    let html = '';
+    for (const t of TIER_ORDER) {
+        const inTier = rows.filter(r => r.tier === t);
+        if (inTier.length === 0) continue;
+        html += `<div class="tier-row"><div class="tier-label tier-${t}">${t} (${inTier.length})</div><div class="tier-content">`;
+        for (const r of inTier) {
+            const src = imgSrc(r);
+            // Enemy portraits aren't all bundled locally (2000+ enemies) — the live app falls
+            // back to a public CDN mirror for the ones it doesn't have; mirrored here so the
+            // static snapshot doesn't just show a blank box for most of the roster.
+            const cdnFallback = r.id ? `https://cdn.jsdelivr.net/gh/fexli/ArknightsResource@main/enemy/${encodeURIComponent(r.id)}.png` : '';
+            const onerror = r.id
+                ? `if(!this.dataset.t){this.dataset.t='1';this.src='${cdnFallback}';}else{this.style.visibility='hidden';}`
+                : `this.style.visibility='hidden';`;
+            const img = src ? `<img src="${src}" onerror="${onerror}" alt="">` : '';
+            html += `<div class="card">
+                <span class="rarity">${r.rarity || ''}${r.rarity ? '★' : ''}</span>
+                ${img}
+                <div class="name" title="${r[nameKey]}">${r[nameKey]}</div>
+                <div class="sub">${subLine(r)}</div>
+            </div>`;
+        }
+        html += `</div></div>`;
+    }
+    container.innerHTML = html || '<div class="hint">No results.</div>';
+}
+
+function renderOperators() {
+    const cat = document.getElementById('op-category').value;
+    const term = document.getElementById('op-search').value.toLowerCase();
+    // The cached data is per-skill/module CONFIG (every combo), not deduped — keep only each
+    // operator's single best-scoring config within the chosen category, same as the live Tier
+    // List's default "Best Config Only" view.
+    const byOp = {};
+    for (const r of opRows) {
+        if (r.category !== cat) continue;
+        if (term && !r.operator_name.toLowerCase().includes(term)) continue;
+        const existing = byOp[r.operator_name];
+        if (!existing || (r.score || 0) > (existing.score || 0)) byOp[r.operator_name] = r;
+    }
+    const rows = Object.values(byOp).sort((a, b) => (b.score || 0) - (a.score || 0));
+    renderTierGroups(document.getElementById('op-results'), rows, 'operator_name',
+        r => `${CLASS_LABEL[r.profession] || r.profession} · ${r.skill_tag || ''} ${r.module_tag || ''}`,
+        r => r.photo_path ? `images/${r.photo_path}` : null);
+}
+
+function renderEnemies() {
+    const cat = document.getElementById('enemy-category').value;
+    const term = document.getElementById('enemy-search').value.toLowerCase();
+    const rows = enemyRows.filter(r => r.category === cat && (!term || (r.name || '').toLowerCase().includes(term)));
+    rows.sort((a, b) => (b.threat_score || 0) - (a.threat_score || 0));
+    renderTierGroups(document.getElementById('enemy-results'), rows, 'name',
+        r => `${(r.tier_type || r.tier || '').toUpperCase()} · ${Math.round(r.threat_score || 0).toLocaleString()} threat`,
+        r => r.id ? `images/enemies/${r.id}.png` : null);
+}
+
+async function init() {
+    const meta = await fetch('snapshot_meta.json').then(r => r.json()).catch(() => null);
+    if (meta && meta.computed_at) {
+        document.getElementById('snapshot-time').innerText = new Date(meta.computed_at * 1000).toLocaleString();
+    }
+
+    const opData = await fetch('operator_tierlist.json').then(r => r.json()).catch(() => ({ rows: [] }));
+    opRows = opData.rows || opData;
+    const opCats = [...new Set(opRows.map(r => r.category))];
+    document.getElementById('op-category').innerHTML = opCats.map(c => `<option value="${c}">${c.toUpperCase()}</option>`).join('');
+    document.getElementById('op-category').addEventListener('change', renderOperators);
+    document.getElementById('op-search').addEventListener('input', renderOperators);
+    renderOperators();
+
+    const enemyData = await fetch('enemy_tierlist.json').then(r => r.json()).catch(() => ({ rows: [] }));
+    enemyRows = enemyData.rows || enemyData;
+    const enemyCats = [...new Set(enemyRows.map(r => r.category))];
+    document.getElementById('enemy-category').innerHTML = enemyCats.map(c => `<option value="${c}">${c.toUpperCase()}</option>`).join('');
+    document.getElementById('enemy-category').addEventListener('change', renderEnemies);
+    document.getElementById('enemy-search').addEventListener('input', renderEnemies);
+    renderEnemies();
+}
+
+document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById('tab-operators').style.display = btn.dataset.tab === 'operators' ? 'block' : 'none';
+        document.getElementById('tab-enemies').style.display = btn.dataset.tab === 'enemies' ? 'block' : 'none';
+    });
+});
+
+init();
+</script>
+</body>
+</html>

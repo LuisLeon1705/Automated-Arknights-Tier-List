@@ -6,6 +6,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en-GB/1.1.0/) a
 
 ---
 
+## [1.3.4] - Fixed: on-demand-server.yml Failed to Even Start (2026-09-13)
+
+### 🐛 Fixed: "Invalid workflow file... Unrecognized named-value: 'secrets'"
+- **Root cause**: `on-demand-server.yml`'s minutes-counter step (1.3.2) used `if: ${{ secrets.BILLING_PAT != '' }}` to skip cleanly when that optional secret isn't set — GitHub's workflow validator rejects the `secrets` context used directly inside a step's `if:` outright, failing the ENTIRE workflow file (not just that step) before any job could run at all.
+- **Fix**: pass the secret through `env:` instead (always a supported place to reference `secrets`) and branch on it in bash rather than in the `if:` expression. Same behavior — the step still skips cleanly with a pointer to the README when the secret isn't set — just expressed in a way the validator actually accepts. Confirmed both workflow files parse as valid YAML and neither references `secrets` inside an `if:` anywhere anymore.
+
+## [1.3.3] - Static Snapshot Page for GitHub Pages (2026-09-13)
+
+### ✨ New: An always-available, no-server "browse the current Tier Lists" page
+- Added `static_site/index.html` — a small standalone page (no Jinja, no API calls) that reads the SAME cached Tier List data the history system (1.3.0) already produces and renders it tier-grouped, portraits included, with a category dropdown (all 8 operator target categories, all 4 enemy threat classes) and a search box, entirely client-side. Deduplicates the cached per-config rows down to each operator's single best-scoring config per category (matching the live Tier List's default "Best Config Only" view).
+- Added `.github/workflows/publish-static-snapshot.yml`, which builds the server, triggers the same background history snapshot the On-Demand Server workflow does, waits for it to finish, then copies just the operator/enemy portraits the snapshot actually references (439/439 operators found locally; enemies fall back to the same CDN mirror the live Enemy Tier List page already uses for the ones not bundled) into a `public/` folder and deploys it to GitHub Pages via the official `actions/upload-pages-artifact`/`deploy-pages` actions. Rebuilds automatically whenever the roster data changes (`push` on `data/Automated_*.json`), or on demand.
+- Confirmed the image-selection logic against the real cache: 439 unique operator portraits (all copied), 2,151 unique enemy portraits (1,480 bundled locally, the rest fall back to CDN at view time) — total site size ~134MB, comfortably under GitHub Pages' 1GB limit.
+- This is explicitly the *read-only* half of the two-URL setup documented in the README (1.3.2) — no Team Builder, no recalculation, no editing. For that, use the On-Demand Server workflow's live tunnel URL instead.
+
 ## [1.3.2] - On-Demand GitHub Actions Server (2026-09-13)
 
 ### ✨ New: Use the Team Builder from another device without hosting anything 24/7
