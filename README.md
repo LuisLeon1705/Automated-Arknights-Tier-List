@@ -107,6 +107,17 @@ TierList/
 
 ---
 
+## Using it from another device (no server running 24/7)
+
+This app is a live Rust server (writes to disk, runs simulations on request) — it isn't hosted anywhere permanently, so there are two different things you might be looking at:
+
+- **The GitHub repo page (this README, the code) — no functionality.** Always available, but it's just documentation and source; there's nothing here to click through or simulate anything with.
+- **A temporary live URL — full functionality.** Triggered on demand via [`.github/workflows/on-demand-server.yml`](.github/workflows/on-demand-server.yml): go to the repo's **Actions** tab → **On-Demand Server** → **Run workflow**, set how long you want it up (minutes), and run it. Within a minute or two the run's log prints a `https://xxxx.trycloudflare.com` URL — open that from any device and it's the real app: Tier List, Team Builder, the "who should I swap next" recommendation, all of it. It runs `READONLY_MODE=1` (the Operator/Enemy Editor tabs are disabled, since the URL is public for that window), and shuts itself down — server and tunnel both — once the timer runs out or you cancel the run.
+- Only accounts with write access to the repo can trigger the workflow, so a stranger can't spin it up even if the repo is public. If you want the code itself private too (not just triggering-access, which is already restricted), that's a separate call — see the workflow's own comments for the tradeoff (private repos get 2,000 free Actions minutes/month instead of unlimited).
+- The workflow's first step prints how many Actions minutes you have left this month, if you've added a `BILLING_PAT` repository secret (Settings → Secrets and variables → Actions → New repository secret, using a classic Personal Access Token — no special scopes needed to read your own billing). Skipped cleanly if that secret isn't set.
+
+---
+
 ## Data Export
 Click **"EXPORT CSV"** on the Tier List page to download the current category's ranking as a lightweight CSV. An earlier PDF/ZIP export (116 pre-compiled PDF reports, ~22 MB) was retired in favor of this — CSV covers the same data at a fraction of the size and loads instantly. The standalone `Scripts/generate_tierlist_pdfs.py` generator still exists if you want PDF reports for offline use, but it's no longer wired into the web app.
 
